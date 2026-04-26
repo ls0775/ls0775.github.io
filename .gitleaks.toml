@@ -1,0 +1,8 @@
+title = "gitleaks config for ls0775.github.io"
+
+[allowlist]
+description = "Allow generated/static and vendor-like assets that can include high-entropy strings"
+paths = [
+  '''^blog/.*$''',
+  '''^fonts/.*$''',
+]

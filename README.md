@@ -25,3 +25,13 @@ GitHub Actions workflow `.github/workflows/sync-blogs.yml` runs:
 - daily on schedule
 
 If generated blog output changes, it commits and pushes updates automatically.
+
+### Required secret for private source repo
+
+Set repository secret `HOMELAB_REPO_TOKEN` (PAT with `repo` read access to `ls0775/homelab`).
+
+Example:
+
+```bash
+gh secret set HOMELAB_REPO_TOKEN --repo ls0775/ls0775.github.io
+```
