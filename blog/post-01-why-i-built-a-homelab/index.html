@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Why I Built a Homelab (and What I'm Actually Building) | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Why I Built a Homelab (and What I'm Actually Building)</h1>
+            <p class="post-date">8 April 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, devops, proxmox, kubernetes, career</p>
+<p dir="auto">I've been working in tech for a while, and there's a recurring gap I kept running into: I could talk about Kubernetes, Terraform, and HA clusters in interviews, but I hadn't actually <em>operated</em> them under real conditions. So I decided to fix that by building a homelab that wouldn't let me cheat — production-like constraints, real failure modes, and everything documented.</p>
+<hr>
+<h2 dir="auto">The Problem With "Learning Kubernetes" Online</h2>
+<p dir="auto">You can spin up a local k3s cluster on your laptop in about 10 minutes. I did that. And then I ran the tutorial, deployed a "hello world," and... didn't really learn anything. The hard parts of operating Kubernetes — HA control planes, etcd backups, node failures, ingress with real TLS, GitOps workflows — those don't show up in a three-node local cluster that disappears when you close your laptop.</p>
+<p dir="auto">What I actually wanted to learn was the stuff that matters when you're on call: What happens when a control plane node goes down? Where does your state live? Is your cluster actually highly available, or just <em>labeled</em> highly available? You can't learn that from a blog post. You have to break things.</p>
+<p dir="auto">So I decided to build a homelab that mirrors how I'd set up infrastructure at work — with proper HA, network segmentation, GitOps, and observability. Not a media server. Not a NAS. Infrastructure.</p>
+<hr>
+<h2 dir="auto">The Hardware</h2>
+<p dir="auto">The good news: I already had most of the hardware sitting in a closet. Two Intel NUC 11 i7s that I'd picked up over the years, and a Synology DS920+ NAS I'd been using for backups.</p>
+<p dir="auto"><strong>pve01:</strong> NUC11PAHi7 — Intel i7-1165G7, 64GB DDR4, 465GB NVMe<br>
+<strong>pve02:</strong> NUC11TNKi7 — Intel i7-1165G7, 64GB DDR4, 500GB NVMe<br>
+<strong>Storage:</strong> Synology DS920+ — 7TB usable over NFS</p>
+<p dir="auto">The NUCs are identical in CPU and RAM (i7-1165G7, 64GB), which matters a lot for Proxmox — you need CPU architecture compatibility to live-migrate VMs between nodes. Two NUCs with different CPU generations would be a problem. Two NUCs with the same generation is a free pass for live migration.</p>
+<p dir="auto">Phase 1 cost: <strong>$0</strong>. Everything came out of existing inventory. That felt like an important constraint to set upfront — this project had to work with what I had, not require a shopping spree.</p>
+<hr>
+<h2 dir="auto">The Plan</h2>
+<p dir="auto">I mapped out the build in five phases:</p>
+<ol dir="auto">
+<li><strong>Phase 1 — Hardware &amp; Proxmox:</strong> Get a real HA hypervisor cluster running. Not just two servers — an actual cluster with quorum and failover.</li>
+<li><strong>Phase 2 — Networking:</strong> VLAN segmentation, a dedicated lab network, proper DNS. No "just put everything on the main network."</li>
+<li><strong>Phase 3 — DevOps Toolchain:</strong> k3s Kubernetes cluster, provisioned with OpenTofu (IaC), configured with Ansible, deployed via Argo CD (GitOps).</li>
+<li><strong>Phase 4 — SRE &amp; Observability:</strong> Prometheus, Grafana, SLO definitions, runbooks, incident log. Treat it like a real platform.</li>
+<li><strong>Phase 5 — Governance &amp; Reliability:</strong> Close the known gaps: 3rd etcd node, off-site backups, CI/CD for infrastructure, secrets hygiene.</li>
+</ol>
+<p dir="auto">The guiding principle is <strong>learn by doing in production-like conditions</strong>. If I wouldn't accept a corner-cut at work, I don't cut it here either.</p>
+<hr>
+<h2 dir="auto">Why Document Everything?</h2>
+<p dir="auto">Two reasons.</p>
+<p dir="auto">The first is practical: I work with AI coding assistants (Claude, Gemini) as engineering collaborators. Keeping a clean, structured repository means the AI has accurate context when I pick the project back up after a week off. Every non-obvious decision gets an Architecture Decision Record (ADR) — a short doc explaining what I chose and why. That discipline keeps future-me (and future-AI) from second-guessing or re-litigating decisions that are already settled.</p>
+<p dir="auto">The second reason is this blog. I want a public record of what I built and how I thought about it. Not a polished "look how smart I am" retrospective, but a real log of the trade-offs, the things that didn't work, and the decisions I'd make differently. That's more valuable to anyone reading than another "here's how to install k3s" post.</p>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<p dir="auto">Before I started building, I thought the hard part of a homelab would be the hardware and the configuration. It turns out the hard part is the <em>decisions</em> — and the discipline to document them before you forget why you made them. Writing an ADR right after you make a choice, when the context is fresh, is completely different from trying to reconstruct your reasoning six months later.</p>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto"><strong>Next:</strong> <a href="/blog/post-02-proxmox-ha-cluster/">Post 02 — Building a Proxmox HA Cluster on Two NUCs</a> — how I turned two NUC 11s and a Synology NAS into a real HA Proxmox cluster, and the specific problem with 2-node clusters that almost nobody mentions until you hit it.</p>
+        </article>
+
+    </main>
+</body>
+</html>

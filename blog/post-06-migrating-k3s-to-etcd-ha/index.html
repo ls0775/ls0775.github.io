@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Migrating k3s from SQLite to etcd HA | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Migrating k3s from SQLite to etcd HA</h1>
+            <p class="post-date">25 April 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, kubernetes, k3s, etcd, high-availability, database</p>
+<p dir="auto">A single-node k3s cluster stores all cluster state in a SQLite database on the server node. SQLite is fine for development — it's simple, zero-maintenance, and doesn't require a separate database process. It's not fine for HA. This post covers the migration to etcd and what "Kubernetes HA" actually means.</p>
+<hr>
+<h2 dir="auto">What's in the Kubernetes Database?</h2>
+<p dir="auto">Before getting into the migration, it helps to understand what's being stored and why it matters.</p>
+<p dir="auto">The Kubernetes API server is stateless — every request handler reads from and writes to a backing store. That store is etcd (or in k3s's case, optionally SQLite). Every Pod spec, every ConfigMap, every Secret, every Deployment, every node registration — it all lives in the database. If the database is gone, the cluster state is gone.</p>
+<p dir="auto">With SQLite, that database is a single file on k3s-server-01. If k3s-server-01 goes down, you can't read or write cluster state. Pods continue running on worker nodes (kubelet is autonomous), but you can't deploy new things, scale existing workloads, or respond to failures. The control plane is effectively down.</p>
+<p dir="auto">With etcd, the database is replicated across multiple server nodes using the Raft consensus algorithm. As long as a majority of etcd members are alive, the cluster state is accessible and writable. With two server nodes, you lose HA at the etcd level (one failure means 1 of 2 members, which is not a majority — but k3s handles this with a specific two-node configuration). With three, you have true fault tolerance.</p>
+<hr>
+<h2 dir="auto">The Migration Process</h2>
+<p dir="auto">k3s supports upgrading from SQLite to etcd by deploying a new server with <code class="notranslate">--cluster-init</code> (which initializes an etcd backend) and joining additional servers to it. I'd already deployed k3s-server-01 with <code class="notranslate">--cluster-init</code>, so it was already running etcd internally.</p>
+<p dir="auto">The migration step was joining k3s-server-02 as a second server. This is done by running k3s on server-02 with the <code class="notranslate">--server</code> flag pointing at server-01 and providing the cluster token:</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate"><span class="pl-c"><span class="pl-c">#</span> On k3s-server-02</span>
+K3S_TOKEN=<span class="pl-s"><span class="pl-pds">$(</span>ssh root@192.168.99.21 cat /var/lib/rancher/k3s/server/node-token<span class="pl-pds">)</span></span>
+curl -sfL https://get.k3s.io <span class="pl-k">|</span> sh -s - server \
+  --server https://192.168.99.21:6443 \
+  --token <span class="pl-smi">$K3S_TOKEN</span> \
+  --tls-san k3s-server-02.lab.ls0775.com \
+  --tls-san k3s-cluster.lab.ls0775.com \
+  --tls-san 192.168.99.22</pre></div>
+<p dir="auto">After a minute or two, k3s-server-02 appeared in the node list:</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate">kubectl get nodes
+<span class="pl-c"><span class="pl-c">#</span> k3s-server-01   Ready   control-plane,master</span>
+<span class="pl-c"><span class="pl-c">#</span> k3s-server-02   Ready   control-plane,master</span></pre></div>
+<p dir="auto">I then verified etcd replication was working:</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate">kubectl -n kube-system <span class="pl-c1">exec</span> etcd-k3s-server-01 -- \
+  etcdctl --endpoints=localhost:2379 member list
+<span class="pl-c"><span class="pl-c">#</span> Should show both server nodes as etcd members</span></pre></div>
+<hr>
+<h2 dir="auto">DNS Round-Robin for HA API Access</h2>
+<p dir="auto">With two control-plane nodes, I needed the cluster API endpoint to be resilient to either node going down. The solution: DNS round-robin in Pi-hole.</p>
+<p dir="auto">I added two A records for <code class="notranslate">k3s-cluster.lab.ls0775.com</code>:</p>
+<pre class="notranslate"><code class="notranslate">192.168.99.21  k3s-cluster.lab.ls0775.com
+192.168.99.22  k3s-cluster.lab.ls0775.com
+</code></pre>
+<p dir="auto">When my workstation connects to <code class="notranslate">k3s-cluster.lab.ls0775.com</code>, Pi-hole returns both IPs. kubectl tries the first, and if that fails (because the node is down), the OS retries with the next. It's not perfect load balancing, but for control-plane access from a workstation it's sufficient.</p>
+<p dir="auto">I updated the kubeconfig on my workstation to use <code class="notranslate">k3s-cluster.lab.ls0775.com:6443</code> as the server address instead of a specific node IP.</p>
+<hr>
+<h2 dir="auto">The Honest Trade-Off: 2-Node etcd Is Still Fragile</h2>
+<p dir="auto">Here's the part I want to be explicit about: <strong>a 2-node etcd cluster is not truly HA.</strong></p>
+<p dir="auto">Raft consensus requires a majority quorum. With 2 nodes, a majority is 2. If either node goes down, you don't have 2 of 2 nodes — you have 1 of 2, which is not a majority. The cluster becomes read-only (or stops accepting writes, depending on the configuration).</p>
+<p dir="auto">k3s has a specific mode for 2-node clusters that's more tolerant than vanilla etcd's 2-node behavior, but the fundamental math doesn't change: losing one of two etcd members is bad.</p>
+<p dir="auto">The right fix is a third control-plane node. I have one planned (a small VM on the Synology VMM, tainted so it only runs control-plane workloads, not application workloads). It's in the risk register as R-001 (Critical). It's not deployed yet because adding a third node requires careful planning around the Synology's CPU budget, and I want to do it in Phase 5 properly rather than rush it now.</p>
+<p dir="auto">Documenting this gap explicitly is important. If I were showing this to an employer, a "we know this risk and here's the plan to address it" is more credible than a setup that <em>looks</em> HA but has a known fragility swept under the rug.</p>
+<hr>
+<h2 dir="auto">etcd Snapshots to Synology NFS</h2>
+<p dir="auto">With etcd handling cluster state, I set up automated snapshots synced to the Synology NFS mount. k3s has built-in snapshot support:</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate"><span class="pl-c"><span class="pl-c">#</span> k3s etcd snapshot configuration in /etc/rancher/k3s/config.yaml</span>
+etcd-snapshot-schedule-cron: <span class="pl-s"><span class="pl-pds">"</span>0 */6 * * *<span class="pl-pds">"</span></span>  <span class="pl-c"><span class="pl-c">#</span> every 6 hours</span>
+etcd-snapshot-retention: 30                  <span class="pl-c"><span class="pl-c">#</span> keep 30 snapshots</span>
+etcd-snapshot-dir: /var/lib/rancher/k3s/server/db/snapshots</pre></div>
+<p dir="auto">A separate script syncs the snapshot directory to the Synology NFS mount at <code class="notranslate">/volume1/proxmox/k3s-etcd-snapshots</code>. This runs on a cron schedule and keeps the last 30 snapshots (roughly 7.5 days of history at 6-hour intervals).</p>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<p dir="auto">The migration from SQLite to etcd made the Kubernetes control plane design tangible in a way that reading documentation didn't. etcd's Raft consensus, the quorum math, the difference between "cluster is running" and "cluster can make decisions" — these are concepts that I'd read about but not felt. Having to think through "what happens if this node goes down right now" for each stage of the migration made those concepts real.</p>
+<p dir="auto">The snapshot setup also drives home a point about distributed systems: replication is not backup. etcd replication protects against node failures. An etcd snapshot protects against data corruption or accidental deletion. You need both, and they serve different purposes.</p>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">Joining k3s-server-02 manually was fine for a one-time migration. But the ongoing operational pattern — provisioning VMs with OpenTofu, then configuring them with Ansible — needed to work as a repeatable workflow. <strong>Next:</strong> <a href="/blog/post-07-configuration-management-ansible/">Post 07 — Post-Provisioning Configuration with Ansible</a> — how Ansible handles the post-provisioning configuration that OpenTofu can't.</p>
+        </article>
+
+    </main>
+</body>
+</html>

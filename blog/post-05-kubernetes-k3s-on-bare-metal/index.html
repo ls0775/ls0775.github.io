@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Kubernetes on Bare Metal: Choosing and Deploying k3s | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Kubernetes on Bare Metal: Choosing and Deploying k3s</h1>
+            <p class="post-date">22 April 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, kubernetes, k3s, bare-metal, metallb, traefik</p>
+<p dir="auto">Running Kubernetes in a homelab is different from running it in a cloud. There's no managed control plane, no load balancer service backed by an AWS ALB, no persistent volume provisioner that just works. You have to solve those problems yourself — and solving them is exactly where the learning happens.</p>
+<hr>
+<h2 dir="auto">Why k3s Over kubeadm</h2>
+<p dir="auto">The standard way to stand up a self-managed Kubernetes cluster is kubeadm. It's the official Kubernetes tool for cluster initialization and is widely documented. I chose k3s instead.</p>
+<p dir="auto">k3s is a lightweight, CNCF-certified Kubernetes distribution maintained by Rancher (now SUSE). It packages the Kubernetes control plane into a single binary, includes Traefik as the default ingress controller and Flannel as the default CNI, and handles certificate management automatically. That's a lot of operational overhead that kubeadm makes you solve yourself.</p>
+<p dir="auto">For a production environment, I'd think harder about this choice — there are trade-offs in the k3s defaults that you might want to customize. But for a homelab where the goal is to learn GitOps, observability, and platform operations (not to learn how to wrangle kubeadm bootstrap tokens), k3s gets you to a working cluster faster and keeps it working with less daily maintenance.</p>
+<p dir="auto">The other consideration: k3s is what I'd reach for in a resource-constrained environment at work (edge deployments, small clusters, iot). Learning its operational characteristics isn't just homelab knowledge — it's career knowledge.</p>
+<hr>
+<h2 dir="auto">Why VMs Over LXC</h2>
+<p dir="auto">Proxmox supports both full VMs (KVM) and containers (LXC). LXC containers are lighter — faster to start, lower overhead. It was tempting to run k3s inside LXC containers instead of full VMs.</p>
+<p dir="auto">I didn't. Here's why:</p>
+<p dir="auto">k3s runs container workloads. A container runtime inside a container (LXC) requires privileged containers or specific kernel capability grants. It works, but it's a known footgun — you end up fighting the container isolation model to give k3s what it needs. More importantly, running Kubernetes nodes in LXC is architecturally different from what you'd do in production, which always uses full VMs or bare metal. If the goal is to learn production-like infrastructure, using a shortcut that doesn't exist in production undermines the point.</p>
+<p dir="auto">Full VMs also give me proper kernel isolation — each k3s node gets its own kernel, which matters when you're testing things that interact with kernel-level features like eBPF, cgroups v2, or kernel network namespaces.</p>
+<hr>
+<h2 dir="auto">The Cluster Topology</h2>
+<p dir="auto">Four VMs, spread across the two Proxmox hosts:</p>
+<markdown-accessiblity-table><table role="table">
+<thead>
+<tr>
+<th>Node</th>
+<th>Role</th>
+<th>Host</th>
+<th>IP</th>
+<th>VM ID</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>k3s-server-01</td>
+<td>control-plane + etcd</td>
+<td>pve01</td>
+<td>192.168.99.21</td>
+<td>301</td>
+</tr>
+<tr>
+<td>k3s-server-02</td>
+<td>control-plane + etcd</td>
+<td>pve02</td>
+<td>192.168.99.22</td>
+<td>304</td>
+</tr>
+<tr>
+<td>k3s-agent-01</td>
+<td>worker</td>
+<td>pve01</td>
+<td>192.168.99.30</td>
+<td>302</td>
+</tr>
+<tr>
+<td>k3s-agent-02</td>
+<td>worker</td>
+<td>pve02</td>
+<td>192.168.99.31</td>
+<td>305</td>
+</tr>
+</tbody>
+</table></markdown-accessiblity-table>
+<p dir="auto">Each VM: 4 vCPU, 8GB RAM, 80GB disk. The server nodes run the control plane (API server, etcd, scheduler, controller-manager). The agent nodes run workloads.</p>
+<p dir="auto">Splitting the VMs across hosts means that losing pve01 takes down k3s-server-01 and k3s-agent-01, but k3s-server-02 stays up on pve02 and the control plane keeps running. This is the same "spread across failure domains" principle used in cloud Kubernetes deployments — except instead of availability zones, my failure domains are two NUCs on a shelf.</p>
+<hr>
+<h2 dir="auto">MetalLB: The Problem Kubernetes Has on Bare Metal</h2>
+<p dir="auto">In a cloud environment, when you create a Kubernetes <code class="notranslate">Service</code> of type <code class="notranslate">LoadBalancer</code>, the cloud provider automatically provisions a load balancer (AWS ALB, GCP CLB, etc.) and assigns it an external IP. On bare metal, nothing does that for you. By default, a <code class="notranslate">LoadBalancer</code> service just sits in <code class="notranslate">&lt;pending&gt;</code> forever.</p>
+<p dir="auto">MetalLB solves this. It's a bare-metal load balancer implementation that watches for <code class="notranslate">LoadBalancer</code> services and assigns them IPs from a pool you define. I configured it with the IP range <code class="notranslate">192.168.99.100–192.168.99.149</code> (reserved in the VLAN 99 IP allocation from <a href="/blog/post-03-network-segmentation-vlans/">Post 03 — Network Segmentation</a>).</p>
+<p dir="auto">Traefik — k3s's bundled ingress controller — gets IP <code class="notranslate">192.168.99.100</code> from MetalLB. Pi-hole's wildcard DNS record (<code class="notranslate">*.lab.ls0775.com</code>) points to that IP. The result: any Kubernetes service with an Ingress rule gets a publicly-resolvable (within the lab) hostname automatically, with no additional infrastructure changes.</p>
+<p dir="auto">The first time I deployed an app and it appeared at <code class="notranslate">appname.lab.ls0775.com</code> with working TLS, that was a genuinely satisfying moment.</p>
+<hr>
+<h2 dir="auto">Initial Deployment</h2>
+<p dir="auto">The initial k3s installation on k3s-server-01 was a single command:</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate">curl -sfL https://get.k3s.io <span class="pl-k">|</span> sh -s - server \
+  --cluster-init \
+  --tls-san k3s-server-01.lab.ls0775.com \
+  --tls-san 192.168.99.21</pre></div>
+<p dir="auto"><code class="notranslate">--cluster-init</code> tells k3s to use etcd (not SQLite) and prepare for additional server nodes. <code class="notranslate">--tls-san</code> adds subject alternative names to the API server's TLS certificate so it's valid when accessed via hostname or IP.</p>
+<p dir="auto">After installation, the kubeconfig at <code class="notranslate">/etc/rancher/k3s/k3s.yaml</code> has the cluster credentials. I copied that to my workstation and adjusted the server address to point at the cluster hostname instead of localhost.</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate">kubectl get nodes
+<span class="pl-c"><span class="pl-c">#</span> k3s-server-01   Ready   control-plane,master</span></pre></div>
+<p dir="auto">One node, working. Not HA yet, but a good starting point to verify the network plumbing was right before complicating it.</p>
+<hr>
+<h2 dir="auto">What Went Wrong</h2>
+<p dir="auto">The main issue I hit early was TLS certificate validation. When I tried to connect to the cluster from my workstation, kubectl rejected the certificate because the server address in the kubeconfig (<code class="notranslate">192.168.99.21</code>) wasn't in the TLS certificate's SAN list — I'd initially deployed without the <code class="notranslate">--tls-san</code> flag. Fix: redeploy k3s with the correct SANs, regenerate the kubeconfig. Not catastrophic, just a restart of the k3s service.</p>
+<p dir="auto">The second issue was MetalLB configuration. MetalLB requires a <code class="notranslate">ConfigMap</code> (or CRD, depending on version) that defines the IP pool. I'd deployed MetalLB but not configured the pool, so LoadBalancer services still showed <code class="notranslate">&lt;pending&gt;</code>. Reading the MetalLB docs more carefully fixed it — the error messages weren't helpful, but the documentation was.</p>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<p dir="auto">Bare-metal Kubernetes forces you to understand the layers that cloud providers abstract away. A <code class="notranslate">LoadBalancer</code> service in EKS "just works" because AWS is running MetalLB-equivalent infrastructure for you behind the scenes. Running MetalLB yourself makes the underlying mechanism explicit — and once you understand it, cloud load balancers are much less magical.</p>
+<p dir="auto">The same applies to ingress: Traefik is doing exactly what AWS ALB Ingress Controller does, just without the AWS-specific annotations.</p>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">A single-server k3s cluster is convenient but not actually highly available. If k3s-server-01 goes down, the API is gone. <strong>Next:</strong> <a href="/blog/post-06-migrating-k3s-to-etcd-ha/">Post 06 — Migrating k3s from SQLite to etcd HA</a> — migrating from SQLite to etcd and joining a second control-plane node to get real Kubernetes HA.</p>
+        </article>
+
+    </main>
+</body>
+</html>

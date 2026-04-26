@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Building a Proxmox HA Cluster on Two NUCs | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Building a Proxmox HA Cluster on Two NUCs</h1>
+            <p class="post-date">11 April 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, proxmox, high-availability, quorum, corosync</p>
+<p dir="auto">Building a "highly available" cluster is one of those things that looks simple until you try to do it with exactly two nodes. Two nodes is the worst-case scenario for distributed consensus, and there's a specific, non-obvious problem you hit immediately. This post is about that problem — and the solution I found.</p>
+<hr>
+<h2 dir="auto">Why Proxmox Over VMware ESXi</h2>
+<p dir="auto">The obvious alternative to Proxmox for a homelab hypervisor is VMware ESXi. A lot of homelab guides use ESXi because you can get a free license for a single host, it's well-documented, and it's what you'll see in enterprise environments.</p>
+<p dir="auto">I went with Proxmox VE for three reasons:</p>
+<p dir="auto"><strong>It's open source.</strong> No license required, no waiting for VMware to decide what "free tier" means this year. Given Broadcom's acquisition of VMware and the subsequent licensing changes, this felt like the right call.</p>
+<p dir="auto"><strong>It's API-driven from day one.</strong> The <code class="notranslate">bpg/proxmox</code> Terraform/OpenTofu provider is mature and well-maintained. I wanted to provision VMs through code, not through a GUI wizard. Proxmox's API makes that straightforward.</p>
+<p dir="auto"><strong>LXC and KVM in the same interface.</strong> Proxmox supports both full VMs (KVM) and containers (LXC). I ended up using VMs for everything important (security boundaries matter), but having the option is useful.</p>
+<p dir="auto">The trade-off: Proxmox documentation can be inconsistent, and some of the web UI design choices are... opinionated. But for a learning environment where you want to understand what's happening underneath, transparent architecture beats polished UX.</p>
+<hr>
+<h2 dir="auto">The Two-Node Problem</h2>
+<p dir="auto">Here's the thing nobody tells you until you're already committed: <strong>a two-node cluster doesn't actually give you high availability by default.</strong></p>
+<p dir="auto">Corosync — the cluster communication layer that Proxmox uses — requires a quorum to make decisions. Quorum means "more than half the votes agree." With two nodes, each node holds one vote. If the two nodes lose connectivity with each other (a "network partition"), neither side can get more than 1 of 2 votes, so neither side can form a quorum.</p>
+<p dir="auto">Without quorum, Proxmox stops all VM operations on both sides. This is the right behavior — it prevents split-brain, where both nodes think they're the primary and start writing conflicting changes. But it means your "HA cluster" just stopped working because of a single network hiccup.</p>
+<p dir="auto">The solution is to add a third vote — something that doesn't run VMs, just exists to break ties. Proxmox calls this a "QDevice."</p>
+<hr>
+<h2 dir="auto">Solving Quorum with a QDevice on the Synology</h2>
+<p dir="auto">I already had a Synology DS920+ NAS in the lab. Synology's Virtual Machine Manager (VMM) lets you run VMs directly on the NAS. So I deployed a tiny Debian VM on the Synology, installed <code class="notranslate">corosync-qnetd</code>, and configured it as the Proxmox cluster's QDevice.</p>
+<p dir="auto">The result: three votes total — pve01, pve02, and the QDevice VM on the Synology. Now if either NUC goes offline, the other two still form a quorum (2 of 3 votes), and the cluster stays operational.</p>
+<p dir="auto">One important implementation detail: I put the QDevice VM on the <strong>Management VLAN</strong> (192.168.10.x), not the Homelab VLAN (99) where the Proxmox nodes live. That required a cross-VLAN firewall rule to allow the Corosync QDevice protocol through, but it means the QDevice's availability is not coupled to the Homelab VLAN — a partial network failure won't take out both the cluster communication <em>and</em> the tiebreaker.</p>
+<p dir="auto">I chose a Debian VM over using Synology's native package manager (Entware) because Debian gives me standard <code class="notranslate">systemd</code> service management, easy SSH access, and a clean upgrade path. The <code class="notranslate">corosync-qnetd</code> package installs and runs cleanly on Debian without any compatibility gymnastics.</p>
+<hr>
+<h2 dir="auto">What Went Wrong</h2>
+<p dir="auto">The first thing I hit was a cross-VLAN connectivity issue. The QDevice VM was on Management VLAN and the Proxmox nodes were on Homelab VLAN 99. I'd correctly set up the Unifi firewall rules to allow the traffic, but I'd forgotten to account for Corosync using ports 5404 and 5405, not just 5403. The cluster would form but the QDevice wouldn't vote.</p>
+<p dir="auto"><code class="notranslate">journalctl -u corosync-qdevice -n 50</code> gave me the relevant error. Once I opened the right ports in the Unifi firewall policy, the QDevice connected cleanly.</p>
+<p dir="auto">The second issue was NFS timing. The Synology NFS export that I mount on both Proxmox nodes occasionally races against the Synology boot sequence. On first setup, I'd forget to add a network dependency to the NFS mount service, and the mount would fail silently on reboot. The fix is to add <code class="notranslate">After=network-online.target</code> to the mount unit — straightforward once you know what to look for.</p>
+<hr>
+<h2 dir="auto">The Failure Modes, Documented</h2>
+<p dir="auto">After the cluster was up, I documented the quorum behavior explicitly:</p>
+<markdown-accessiblity-table><table role="table">
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Cluster State</th>
+<th>Resolution</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>pve01 down</td>
+<td>Quorate (pve02 + QDevice = 2 of 3)</td>
+<td>Auto-failover</td>
+</tr>
+<tr>
+<td>pve02 down</td>
+<td>Quorate (pve01 + QDevice = 2 of 3)</td>
+<td>Auto-failover</td>
+</tr>
+<tr>
+<td>QDevice down</td>
+<td>NOT quorate (1 of 3 each side)</td>
+<td>Restart QDevice VM on Synology</td>
+</tr>
+<tr>
+<td>Both NUCs down</td>
+<td>Offline</td>
+<td>Manual recovery</td>
+</tr>
+</tbody>
+</table></markdown-accessiblity-table>
+<p dir="auto">The QDevice being a single point of failure (sort of) is a known, accepted risk. If the Synology goes down, Proxmox loses quorum and VMs are fenced — but the Synology also holds the NFS storage, so losing the Synology would already be a bad day. The risk is documented in the risk register.</p>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<p dir="auto">Two-node HA is a specific architecture that requires explicit quorum design. You can't just plug two servers into a switch and call it a cluster — you need to decide <em>in advance</em> what happens when they can't talk to each other, and then build that decision into the system.</p>
+<p dir="auto">The QDevice pattern is the same thing enterprise storage clusters do with "witness" nodes. Learning it in a homelab, where the stakes are low, means the concept is fully internalized before I encounter it in production.</p>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">With the hypervisor layer solid, the next challenge was the network. Putting everything on the home network felt wrong — I wanted real isolation between lab traffic and personal devices. <strong>Next:</strong> <a href="/blog/post-03-network-segmentation-vlans/">Post 03 — Network Segmentation: 6 VLANs for a Home Network</a> — six VLANs, a Unifi gateway, and why I moved all lab infrastructure to its own subnet.</p>
+        </article>
+
+    </main>
+</body>
+</html>

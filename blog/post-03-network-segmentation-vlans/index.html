@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Network Segmentation: 6 VLANs for a Home Network | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Network Segmentation: 6 VLANs for a Home Network</h1>
+            <p class="post-date">15 April 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, networking, vlans, unifi, pihole, dns</p>
+<p dir="auto">Most homelab guides treat networking as an afterthought — "plug everything into your router, move on." I wanted to do it properly from day one, which meant VLANs, firewall policies, and a DNS strategy that would actually scale as I added services. This post covers that setup and the specific decision that changed how I think about home network security.</p>
+<hr>
+<h2 dir="auto">Why Segment at All?</h2>
+<p dir="auto">Before I started, all my home devices were on one flat network. My personal laptop, my security cameras, my IoT devices, my lab servers — all on the same subnet, all able to talk to each other freely. That's the default for most home routers.</p>
+<p dir="auto">There are two good reasons to change this:</p>
+<p dir="auto"><strong>Security.</strong> IoT devices have a bad track record. A compromised smart bulb or camera shouldn't have free access to your NAS or your development machines. VLANs let you enforce network-layer isolation between device categories.</p>
+<p dir="auto"><strong>Lab isolation.</strong> When you're experimenting with infrastructure — rebooting servers, reconfiguring networking, deploying things that might misbehave — you don't want that noise affecting your personal devices. Running the lab on its own VLAN means a misconfigured firewall rule or a crashed Kubernetes node doesn't take down your home network.</p>
+<hr>
+<h2 dir="auto">The Six VLANs</h2>
+<p dir="auto">I ended up with six VLANs, managed by a UniFi Cloud Gateway Fiber (UCG Fiber) as the router:</p>
+<markdown-accessiblity-table><table role="table">
+<thead>
+<tr>
+<th>VLAN</th>
+<th>Name</th>
+<th>Subnet</th>
+<th>What's Here</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1</td>
+<td>Management</td>
+<td>192.168.10.0/24</td>
+<td>Pi-hole, Synology NAS, QDevice VM</td>
+</tr>
+<tr>
+<td>20</td>
+<td>Trusted</td>
+<td>192.168.20.0/24</td>
+<td>Personal PCs, phones</td>
+</tr>
+<tr>
+<td>30</td>
+<td>Guest</td>
+<td>192.168.30.0/24</td>
+<td>Guests, Chromecasts</td>
+</tr>
+<tr>
+<td>40</td>
+<td>IoT</td>
+<td>192.168.40.0/24</td>
+<td>Home Assistant, smart devices</td>
+</tr>
+<tr>
+<td>50</td>
+<td>CCTV</td>
+<td>192.168.50.0/24</td>
+<td>Security cameras</td>
+</tr>
+<tr>
+<td>99</td>
+<td>Homelab</td>
+<td>192.168.99.0/24</td>
+<td>Proxmox nodes, k3s cluster, lab services</td>
+</tr>
+</tbody>
+</table></markdown-accessiblity-table>
+<p dir="auto">VLAN 99 for the Homelab was a deliberate choice — a high, memorable number that stands out in firewall logs and makes it obvious which VLAN I'm looking at. The Management VLAN being VLAN 1 follows standard convention: it's the default untagged VLAN on most switches, which makes physical cable management simpler.</p>
+<hr>
+<h2 dir="auto">The Move That Changed How I Think About Home Networks</h2>
+<p dir="auto">When I initially set up the lab, I put everything — Proxmox, the Synology, the NUCs — on VLAN 20 (Trusted). It was the path of least resistance.</p>
+<p dir="auto">Then I sat down to write the firewall policy and realized the problem: if I put lab servers on the Trusted VLAN, the security boundary between "lab experiments" and "personal data" is zero. My Kubernetes cluster was one misconfigured pod security policy away from being on the same network as my financial documents.</p>
+<p dir="auto">So I migrated all lab infrastructure to VLAN 99 (completed April 9, 2026). The Proxmox nodes moved to <code class="notranslate">192.168.99.11/12</code>. The k3s VMs moved to <code class="notranslate">192.168.99.21/22/30/31</code>. The Synology stayed on Management VLAN because it serves both the lab (NFS storage) and personal use (backups), and putting it on both VLANs with selective firewall rules was cleaner than duplicating it.</p>
+<p dir="auto">The migration was straightforward in Unifi — reassign the switch port VLAN tags and update the static IP reservations. The more interesting challenge was getting the firewall rules right afterward.</p>
+<hr>
+<h2 dir="auto">The IP Allocation Strategy</h2>
+<p dir="auto">For VLAN 99, I designed the IP range semantically rather than just assigning IPs as devices appeared:</p>
+<markdown-accessiblity-table><table role="table">
+<thead>
+<tr>
+<th>Range</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code class="notranslate">.1</code></td>
+<td>Gateway</td>
+</tr>
+<tr>
+<td><code class="notranslate">.11–.19</code></td>
+<td>Proxmox bare-metal hosts</td>
+</tr>
+<tr>
+<td><code class="notranslate">.20–.29</code></td>
+<td>k3s control-plane nodes</td>
+</tr>
+<tr>
+<td><code class="notranslate">.30–.39</code></td>
+<td>k3s worker nodes</td>
+</tr>
+<tr>
+<td><code class="notranslate">.40–.99</code></td>
+<td>Other infra VMs (Gitea, CI runners, etc.)</td>
+</tr>
+<tr>
+<td><code class="notranslate">.100–.149</code></td>
+<td>MetalLB pool (Kubernetes LoadBalancer IPs)</td>
+</tr>
+<tr>
+<td><code class="notranslate">.200–.249</code></td>
+<td>DHCP dynamic pool</td>
+</tr>
+</tbody>
+</table></markdown-accessiblity-table>
+<p dir="auto">This design means the IP address tells you what the device <em>is</em>. <code class="notranslate">192.168.99.22</code> is obviously a k3s server node. <code class="notranslate">192.168.99.100</code> is obviously a MetalLB-assigned service. Firewall rules written against IP ranges are self-documenting in a way that per-host rules are not.</p>
+<hr>
+<h2 dir="auto">Firewall Policy: Default Deny</h2>
+<p dir="auto">All inter-VLAN traffic is blocked by default in Unifi. Permitted flows are explicitly enumerated:</p>
+<markdown-accessiblity-table><table role="table">
+<thead>
+<tr>
+<th>From</th>
+<th>To</th>
+<th>Port</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>All VLANs</td>
+<td>Pi-hole (192.168.10.10)</td>
+<td>53/UDP,TCP</td>
+<td>DNS for every VLAN</td>
+</tr>
+<tr>
+<td>Homelab (99)</td>
+<td>Synology (192.168.10.11)</td>
+<td>2049/TCP</td>
+<td>NFS storage backups</td>
+</tr>
+<tr>
+<td>Homelab (99)</td>
+<td>QDevice VM</td>
+<td>Corosync ports</td>
+<td>Proxmox cluster quorum</td>
+</tr>
+</tbody>
+</table></markdown-accessiblity-table>
+<p dir="auto">The principle: everything is blocked unless there's a specific, documented reason to allow it. This is the same "default deny" posture used in enterprise network security. In practice for a homelab, it means I occasionally have to debug a connectivity issue when I add a new service, but that debugging always reveals a gap in my mental model that I'm glad to know about.</p>
+<hr>
+<h2 dir="auto">Pi-hole as the Network DNS</h2>
+<p dir="auto">Pi-hole sits at <code class="notranslate">192.168.10.10</code> and is configured as the primary DNS server for all VLANs. Every device on the network — across all six VLANs — uses Pi-hole as its resolver.</p>
+<p dir="auto">Pi-hole gives me three things:</p>
+<ol dir="auto">
+<li><strong>Network-wide ad blocking</strong> — effective and centralized, no per-device configuration</li>
+<li><strong>Local DNS records</strong> — I can define <code class="notranslate">pve01.lab.ls0775.com → 192.168.99.11</code> and have that resolve from any device on any VLAN</li>
+<li><strong>Query logging</strong> — invaluable for debugging connectivity issues ("is DNS resolving? is the response correct?")</li>
+</ol>
+<p dir="auto">For lab services, I adopted a wildcard DNS pattern: <code class="notranslate">*.lab.ls0775.com</code> resolves to <code class="notranslate">192.168.99.100</code> (the Traefik MetalLB IP). This means I can add a new Kubernetes service with an Ingress rule and it gets a hostname automatically — no Pi-hole configuration change needed. The first time I deployed a new app and it just <em>appeared</em> at <code class="notranslate">newapp.lab.ls0775.com</code>, that felt genuinely satisfying.</p>
+<hr>
+<h2 dir="auto">What Went Wrong</h2>
+<p dir="auto">The first issue was forgetting the NFS firewall rule when I moved the lab to VLAN 99. After the move, the Proxmox nodes couldn't reach the Synology NFS export. The error in the Proxmox storage UI was unhelpfully generic ("storage unavailable"), but <code class="notranslate">ping 192.168.10.11</code> from pve01 confirmed the problem was reachability, not the NFS configuration itself. Added the firewall rule, NFS came back.</p>
+<p dir="auto">The second issue was DNS forwarding. When I set up Pi-hole on VLAN 1 (Management) and pointed all VLANs at it, I initially forgot to add a Unifi firewall rule allowing DNS traffic <em>from</em> VLAN 30 (Guest) <em>to</em> VLAN 1. Guests couldn't resolve DNS. The fix was a 30-second firewall rule change, but debugging it took longer because I was looking at the wrong VLAN.</p>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<p dir="auto">Default-deny firewall policy forces you to think explicitly about every communication path in your network. That's uncomfortable when you first set it up — it feels like everything breaks and nothing works. But it teaches you your network in a way that default-allow never will. Three months later, I can draw the inter-VLAN firewall rules from memory because I had to build them one at a time and understand why each one exists.</p>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">With the network sorted, the next piece was provisioning the k3s VMs. Rather than doing it manually through the Proxmox GUI, I wanted to do it with code — Infrastructure as Code from day one. <strong>Next:</strong> <a href="/blog/post-04-infrastructure-as-code-opentofu/">Post 04 — Infrastructure as Code: Provisioning VMs with OpenTofu</a> — OpenTofu (Terraform's open-source fork) and the <code class="notranslate">bpg/proxmox</code> provider.</p>
+        </article>
+
+    </main>
+</body>
+</html>

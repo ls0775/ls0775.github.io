@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Infrastructure as Code: Provisioning VMs with OpenTofu | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Infrastructure as Code: Provisioning VMs with OpenTofu</h1>
+            <p class="post-date">18 April 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, opentofu, terraform, iac, proxmox, devops</p>
+<p dir="auto">I could have clicked through the Proxmox GUI to create VMs. It takes maybe 5 minutes per VM, it works, and for a homelab that's probably fine. I didn't do that. This post is about why writing HCL to declare four VMs across two Proxmox hosts is worth the extra setup time — and one very honest admission about a known gap in my approach.</p>
+<hr>
+<h2 dir="auto">Why OpenTofu Over Terraform</h2>
+<p dir="auto">Terraform is the industry standard for Infrastructure as Code. I'd used it at work. The obvious move was to use Terraform here.</p>
+<p dir="auto">I chose OpenTofu instead. OpenTofu is an open-source fork of Terraform created after HashiCorp changed Terraform's license from MPL to BSL in 2023. The BSL license restricts certain competitive uses in ways the MPL didn't, and the infrastructure-as-code community responded by forking the project under the OpenTofu project (now part of the Linux Foundation).</p>
+<p dir="auto">For a homelab, the practical differences are minor — OpenTofu is fully compatible with Terraform providers and most Terraform configurations work without modification. The reason I went with OpenTofu was partly philosophical (I want my tools to be genuinely open source) and partly practical (the OpenTofu community is active and the project's governance model is more transparent about future direction).</p>
+<hr>
+<h2 dir="auto">The bpg/proxmox Provider</h2>
+<p dir="auto">The <code class="notranslate">bpg/proxmox</code> provider is the mature, actively-maintained OpenTofu/Terraform provider for Proxmox. It lets you declare Proxmox VMs in HCL and have OpenTofu make them real.</p>
+<p dir="auto">Authentication is via a Proxmox API token — not a username and password. The API token approach is better for several reasons: you can scope it to specific privileges, you can revoke it without changing a password, and you can generate one per tool or purpose. For OpenTofu, I created a dedicated service user (<code class="notranslate">tofu@pve</code>) and generated a token for it with only the privileges needed to manage VMs.</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate">pveum user add tofu@pve
+pveum role add TofuRole -privs <span class="pl-s"><span class="pl-pds">"</span>VM.Allocate VM.Clone VM.Config.CDROM <span class="pl-cce">\</span></span>
+<span class="pl-s">  VM.Config.CPU VM.Config.Disk VM.Config.HWType VM.Config.Memory <span class="pl-cce">\</span></span>
+<span class="pl-s">  VM.Config.Network VM.Config.Options VM.Audit VM.PowerMgmt <span class="pl-cce">\</span></span>
+<span class="pl-s">  Datastore.AllocateSpace Datastore.Audit Sys.Audit<span class="pl-pds">"</span></span>
+pveum aclmod / -user tofu@pve -role TofuRole
+pveum user token add tofu@pve tofu --privsep=0</pre></div>
+<p dir="auto">The token value is shown once at generation — copy it immediately into <code class="notranslate">terraform.tfvars</code>, which is gitignored. The token ID (<code class="notranslate">tofu@pve!tofu</code>) goes in config files. The token secret never touches the repository.</p>
+<hr>
+<h2 dir="auto">Declaring the VMs</h2>
+<p dir="auto">The actual HCL declares each VM with its target Proxmox host, CPU count, memory, disk size, and network config. For four VMs across two hosts, the configuration is maybe 100 lines of HCL — verbose by some standards, but explicit in a way that a GUI wizard isn't.</p>
+<p dir="auto">The workflow:</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate"><span class="pl-c1">cd</span> infra/
+tofu init           <span class="pl-c"><span class="pl-c">#</span> download providers</span>
+tofu plan           <span class="pl-c"><span class="pl-c">#</span> show what will change</span>
+tofu apply          <span class="pl-c"><span class="pl-c">#</span> make it so</span></pre></div>
+<p dir="auto"><code class="notranslate">tofu plan</code> is the most useful step. It shows you exactly what OpenTofu is going to do before it does it — create, update, or destroy. For infrastructure, having a diff before you commit is invaluable. I've caught several configuration mistakes at the <code class="notranslate">plan</code> stage that would have been painful to fix after <code class="notranslate">apply</code>.</p>
+<p dir="auto">One practical detail: my first k3s server VM (<code class="notranslate">k3s-server-01</code>) existed in Proxmox before I wrote the OpenTofu configuration, because I'd set it up manually initially. OpenTofu's <code class="notranslate">import</code> command lets you pull an existing resource into the state file without recreating it:</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate">tofu import proxmox_virtual_environment_vm.k3s_server_01 pve01/301</pre></div>
+<p dir="auto">After import, <code class="notranslate">tofu plan</code> showed the drift between the actual VM config and what I'd declared in HCL. I reconciled the HCL to match reality, then applied — and from that point, OpenTofu owned the VM.</p>
+<hr>
+<h2 dir="auto">The IaC Workstation-Only Policy</h2>
+<p dir="auto">I made an explicit decision (ADR-013) to run all IaC from my DevOps workstation only — not from a shared CI/CD system, not from a server in the cluster. The reasons:</p>
+<p dir="auto"><strong>Secrets management.</strong> Running <code class="notranslate">tofu apply</code> requires the Proxmox API token. I didn't want to manage that secret in GitHub Actions or a CI system until I had a proper secrets management strategy. The workstation is the one machine I control fully.</p>
+<p dir="auto"><strong>Blast radius.</strong> A misconfigured CI/CD pipeline that automatically applies infrastructure changes can destroy things faster than you can stop it. For a learning environment, I'd rather have the human in the loop on every apply.</p>
+<p dir="auto">This is a known trade-off. Manual execution means there's no automated check that the repo state matches the actual infrastructure. I've documented that gap in the risk register as R-006 — it'll be addressed in Phase 5 with GitHub Actions running <code class="notranslate">tofu plan</code> on PRs and requiring manual approval for <code class="notranslate">apply</code>.</p>
+<hr>
+<h2 dir="auto">The Known Gap: Local State File</h2>
+<p dir="auto">The biggest honesty moment in this entire blog series: <strong>my OpenTofu state file is stored locally on my workstation.</strong></p>
+<p dir="auto">The <code class="notranslate">terraform.tfstate</code> file is what OpenTofu uses to track what it's created and how it maps to the HCL declarations. If that file is lost or corrupted, OpenTofu loses track of the infrastructure it manages. You can usually recover by re-importing resources, but it's painful and error-prone.</p>
+<p dir="auto">The right solution is a remote state backend — a central store that the state file lives in, accessible from any machine, with locking to prevent concurrent applies. In a cloud environment you'd use an S3 bucket. In a self-hosted environment, MinIO provides an S3-compatible API.</p>
+<p dir="auto">I haven't deployed MinIO yet. It's the highest-priority item on the Phase 4 backlog (risk register: R-002, Critical). The state file is gitignored and backed up to the Synology NAS, but a local file on a single workstation is not a sustainable architecture. I'm documenting this explicitly because hiding known gaps in a portfolio piece is worse than admitting they exist.</p>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<p dir="auto">IaC is most valuable for its <em>documentation</em> as much as its <em>automation</em>. The HCL files are a precise, executable specification of the infrastructure — every VM, its CPU count, its memory, which host it lives on, which network it's attached to. That's more accurate than any written documentation, because it's the thing that actually makes the infrastructure exist. When I look at the HCL, I know exactly what's deployed. When I look at a written doc, I wonder if it's still accurate.</p>
+<p dir="auto">The import-first workflow (import existing resources, reconcile drift, then manage going forward) is also a realistic pattern. In the real world, you often inherit infrastructure that wasn't created with IaC. The pattern of "import, drift-check, adopt" is how you bring that infrastructure under IaC management without recreating it.</p>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">With VMs provisionable via code, the next step was deploying Kubernetes. I chose k3s over kubeadm — <a href="/blog/post-05-kubernetes-k3s-on-bare-metal/">Post 05 — Kubernetes on Bare Metal: Choosing and Deploying k3s</a> covers why, and what the initial deployment looked like.</p>
+        </article>
+
+    </main>
+</body>
+</html>
