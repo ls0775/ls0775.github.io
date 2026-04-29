@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Post-Provisioning Configuration with Ansible | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Post-Provisioning Configuration with Ansible</h1>
+            <p class="post-date">29 April 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, ansible, configuration-management, k3s, devops, idempotency</p>
+<p dir="auto">OpenTofu creates the VM. It does not configure what runs inside it. That's a separate concern — and Ansible is how I handle it. This post is about the clean separation between infrastructure provisioning (IaC) and configuration management, and why that separation matters.</p>
+<hr>
+<h2 dir="auto">The OpenTofu + Ansible Split</h2>
+<p dir="auto">There's a natural boundary in infrastructure management:</p>
+<p dir="auto"><strong>OpenTofu manages infrastructure state:</strong> "There should be a VM on pve01 with 4 vCPUs, 8GB RAM, and IP 192.168.99.21. That VM should be running."</p>
+<p dir="auto"><strong>Ansible manages software state:</strong> "That VM should be running k3s in server mode, joined to the existing cluster, with the correct token."</p>
+<p dir="auto">These are different concerns. OpenTofu speaks to the Proxmox API — it doesn't know or care what's running inside the VM. Ansible speaks to the VM over SSH — it doesn't know or care that the VM was created by OpenTofu rather than a GUI wizard.</p>
+<p dir="auto">Keeping them separate means each tool does what it's best at. OpenTofu's declarative model is excellent for resources with clean create/update/delete semantics. Ansible's task-based model is excellent for configuration that's stateful in ways that don't map cleanly to a single API call.</p>
+<hr>
+<h2 dir="auto">Why Ansible</h2>
+<p dir="auto">For post-provisioning configuration, I looked at a few options:</p>
+<p dir="auto"><strong>Cloud-init</strong> handles initial boot configuration (hostname, SSH keys, initial package installs). I use cloud-init for the basics, but it only runs once (on first boot) and isn't idempotent in any meaningful sense.</p>
+<p dir="auto"><strong>Shell scripts</strong> work, but they're fragile. A script that installs k3s and joins a node is easy to write and hard to re-run safely. Did the join already happen? Is the token still valid? You end up adding a lot of "if already done, skip" logic that Ansible handles for you.</p>
+<p dir="auto"><strong>Ansible</strong> is idempotent by design. Every Ansible task is supposed to describe a desired state, and running the playbook twice should be safe — the second run detects that the state is already correct and makes no changes. For joining k3s nodes (where joining an already-joined node is an error), that idempotency requires some care, but the pattern is well-established.</p>
+<p dir="auto">I also chose Ansible over Puppet or Chef because it's agentless — no daemon to install or manage on the target hosts. The control machine (my workstation) SSH-es into the target and runs tasks. For a homelab where nodes get rebuilt occasionally, not having an agent dependency is significantly simpler.</p>
+<hr>
+<h2 dir="auto">The Inventory Structure</h2>
+<p dir="auto">Ansible knows about your infrastructure through an inventory file. Mine is YAML and lives at <code class="notranslate">config/inventory/hosts.yaml</code>:</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">all</span>:
+  <span class="pl-ent">children</span>:
+    <span class="pl-ent">k3s_servers</span>:
+      <span class="pl-ent">hosts</span>:
+        <span class="pl-ent">k3s-server-01</span>:
+          <span class="pl-ent">ansible_host</span>: <span class="pl-s">192.168.99.21</span>
+        <span class="pl-ent">k3s-server-02</span>:
+          <span class="pl-ent">ansible_host</span>: <span class="pl-s">192.168.99.22</span>
+    <span class="pl-ent">k3s_agents</span>:
+      <span class="pl-ent">hosts</span>:
+        <span class="pl-ent">k3s-agent-01</span>:
+          <span class="pl-ent">ansible_host</span>: <span class="pl-s">192.168.99.30</span>
+        <span class="pl-ent">k3s-agent-02</span>:
+          <span class="pl-ent">ansible_host</span>: <span class="pl-s">192.168.99.31</span></pre></div>
+<p dir="auto">Groups (<code class="notranslate">k3s_servers</code>, <code class="notranslate">k3s_agents</code>) let me target playbooks at the right set of hosts. When I want to join a new agent node, I run the agent playbook and Ansible knows exactly which hosts are agents.</p>
+<hr>
+<h2 dir="auto">The k3s Node-Joining Playbooks</h2>
+<p dir="auto">The most important playbooks are for joining k3s nodes to the cluster. The pattern for joining a server node (k3s-server-02):</p>
+<ol dir="auto">
+<li>Fetch the cluster join token from k3s-server-01 via SSH</li>
+<li>Install k3s in server mode on k3s-server-02, passing the token and the existing server's address</li>
+<li>Verify the node appears in <code class="notranslate">kubectl get nodes</code> with the correct role</li>
+</ol>
+<p dir="auto">The token retrieval step is important: rather than having the token hardcoded in the playbook (bad — it's a secret) or requiring the operator to look it up manually (tedious and error-prone), the playbook reads it directly from the source:</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate">- <span class="pl-ent">name</span>: <span class="pl-s">Get k3s join token</span>
+  <span class="pl-ent">shell</span>: <span class="pl-s">cat /var/lib/rancher/k3s/server/node-token</span>
+  <span class="pl-ent">register</span>: <span class="pl-s">k3s_token</span>
+  <span class="pl-ent">delegate_to</span>: <span class="pl-s">k3s-server-01</span>
+
+- <span class="pl-ent">name</span>: <span class="pl-s">Join k3s server node</span>
+  <span class="pl-ent">shell</span>: <span class="pl-s">|</span>
+<span class="pl-s">    curl -sfL https://get.k3s.io | sh -s - server \</span>
+<span class="pl-s">      --server https://192.168.99.21:6443 \</span>
+<span class="pl-s">      --token {{ k3s_token.stdout }} \</span>
+<span class="pl-s">      --tls-san {{ inventory_hostname }}.lab.ls0775.com</span>
+<span class="pl-s"></span>  <span class="pl-ent">when</span>: <span class="pl-s"><span class="pl-pds">"</span>'control-plane' not in existing_roles.stdout<span class="pl-pds">"</span></span></pre></div>
+<p dir="auto">The <code class="notranslate">when</code> condition on the join step is the idempotency guard — if the node is already a control-plane member, skip the join. That check queries <code class="notranslate">kubectl get nodes</code> first and registers the result.</p>
+<hr>
+<h2 dir="auto">Running the Playbooks</h2>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate"><span class="pl-c1">cd</span> config/
+
+<span class="pl-c"><span class="pl-c">#</span> Ping all hosts to verify SSH connectivity</span>
+ansible all -i inventory/hosts.yaml -m ping
+
+<span class="pl-c"><span class="pl-c">#</span> Join all agent nodes</span>
+ansible-playbook -i inventory/hosts.yaml playbooks/k3s-agent.yaml
+
+<span class="pl-c"><span class="pl-c">#</span> Join a specific agent node</span>
+ansible-playbook -i inventory/hosts.yaml playbooks/k3s-agent.yaml --limit k3s-agent-02</pre></div>
+<p dir="auto">The <code class="notranslate">--limit</code> flag is useful when adding a new node — you've already added it to the inventory, and you want to run the playbook against just the new node without touching the existing ones.</p>
+<hr>
+<h2 dir="auto">What Went Wrong</h2>
+<p dir="auto">The main issue I hit was SSH key authentication. Ansible connects via SSH, and the first time I ran a playbook against a new VM, it failed because the SSH key wasn't authorized on the target. The fix is to add the SSH public key to the VM's <code class="notranslate">authorized_keys</code> during provisioning — which is actually a cloud-init job, not an Ansible job. Once I set up cloud-init templates in Proxmox to include the SSH key, new VMs were immediately reachable by Ansible without any manual setup.</p>
+<p dir="auto">The second issue was Ansible's Python dependency. Ansible tasks run Python on the target host, and some of my early Ubuntu VMs didn't have Python installed. The fix: add <code class="notranslate">apt-get install -y python3</code> to the cloud-init user-data. It's a chicken-and-egg problem (you need Ansible to run to install Python, but you need Python to run Ansible), solved by doing the Python install at cloud-init time instead.</p>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<p dir="auto">The IaC + Ansible split clarifies something that gets blurry when you use tools like Terraform with remote-exec provisioners or Ansible with the Terraform provider: infrastructure state and configuration state are different things with different lifecycle properties.</p>
+<p dir="auto">Infrastructure changes slowly — a VM doesn't get recreated every time you change an app config. Configuration changes more frequently — you might update the k3s version, add a node, or change a configuration parameter without touching the VM's existence or resource allocation. Keeping these separate means changes in one domain don't accidentally trigger unwanted changes in the other.</p>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">With VMs provisioned by OpenTofu and configured by Ansible, the cluster was operational. The next question was how to deploy applications. The answer: GitOps with Argo CD. <strong>Next:</strong> <a href="/blog/post-08-gitops-with-argocd/">Post 08 — GitOps: Deploying Applications with Argo CD</a> — what GitOps actually means in practice, and why I chose Argo CD over Flux.</p>
+        </article>
+
+    </main>
+</body>
+</html>
