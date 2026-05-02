@@ -22,6 +22,14 @@ SOURCE_BRANCH = "main"
 SOURCE_BLOG_ROOT = "docs/blogs"
 API_BASE = "https://api.github.com"
 BLOG_ROOT = Path(__file__).resolve().parent.parent / "blog"
+SUPPLEMENTAL_POSTS = (
+    {
+        "number": 0,
+        "title": "Post 00 — What Is a Homelab? A Plain-English Guide to This Project",
+        "filename": "post-00-what-is-a-homelab.md",
+        "publish_date": "2026-04-08",
+    },
+)
 
 CALENDAR_ROW_RE = re.compile(
     r"^\|\s*(\d+)\s*\|\s*\[(.+?)\]\(\./(post-\d{2}[^)]+\.md)\)\s*\|\s*[^|]*\|\s*(\d{4}-\d{2}-\d{2})\s*\|$"
@@ -142,6 +150,27 @@ def _parse_calendar(readme_markdown: str) -> list[tuple[int, str, str, dt.date]]
     return posts
 
 
+def _merge_supplemental_posts(
+    posts: list[tuple[int, str, str, dt.date]],
+) -> list[tuple[int, str, str, dt.date]]:
+    seen_filenames = {filename for _, _, filename, _ in posts}
+    merged = list(posts)
+
+    for extra in SUPPLEMENTAL_POSTS:
+        if extra["filename"] in seen_filenames:
+            continue
+        merged.append(
+            (
+                int(extra["number"]),
+                str(extra["title"]),
+                str(extra["filename"]),
+                dt.date.fromisoformat(str(extra["publish_date"])),
+            )
+        )
+
+    return merged
+
+
 def _extract_fallback_title(markdown: str) -> str:
     match = TITLE_RE.search(markdown)
     if match:
@@ -231,7 +260,7 @@ def main() -> None:
     _ensure_static_assets()
 
     calendar_md = _fetch_repo_file(token, f"{SOURCE_BLOG_ROOT}/README.md")
-    calendar_rows = _parse_calendar(calendar_md)
+    calendar_rows = _merge_supplemental_posts(_parse_calendar(calendar_md))
 
     posts: list[Post] = []
     today = dt.date.today()

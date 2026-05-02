@@ -7,6 +7,7 @@ Personal static site and blog publishing target.
 Blog source content is maintained in `ls0775/homelab` at `docs/blogs/` and synced into this repository as static pages.
 
 - Source calendar is parsed from: `docs/blogs/README.md`
+- Supplemental posts can be pinned locally in `scripts/sync_blogs.py` when a published page should exist even if it is not yet listed in the source calendar
 - Published pages are generated under: `blog/`
 - Future-dated posts are hidden until their publish date
 

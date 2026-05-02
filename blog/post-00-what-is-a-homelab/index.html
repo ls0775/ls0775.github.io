@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Post 00 — What Is a Homelab? A Plain-English Guide to This Project | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Post 00 — What Is a Homelab? A Plain-English Guide to This Project</h1>
+            <p class="post-date">8 April 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, overview, beginner, plain-english</p>
+<p dir="auto">If you have never built a homelab before, a lot of the words in this repository can sound like they belong in a server room, not a house. That is normal. This post is the simple-language version of what this project is, why someone would build it, and how the rest of the blog series fits together.</p>
+<p dir="auto">The short version: this repository is a record of someone building a small private practice environment for modern IT and platform work. Think of it like a flight simulator for infrastructure. It is not the same as running a global tech company, but it is close enough to practice the habits, tools, and failure recovery that matter in real jobs.</p>
+<hr>
+<h2 dir="auto">What a Homelab Is</h2>
+<p dir="auto">A homelab is a space at home where someone experiments with technology on purpose. Sometimes that means a spare laptop in a cupboard. Sometimes it means a shelf full of tiny computers. The point is not the size. The point is having a safe place to learn by doing.</p>
+<p dir="auto">People build homelabs for different reasons:</p>
+<ul dir="auto">
+<li>to learn skills they do not get to practice at work</li>
+<li>to test ideas before using them on important systems</li>
+<li>to understand how the internet and modern apps actually run behind the scenes</li>
+<li>to build confidence by fixing real problems instead of only reading about them</li>
+</ul>
+<p dir="auto">Some homelabs focus on movies, music, backups, or smart-home tools. This one is different. It is focused on infrastructure: the behind-the-scenes systems that keep applications running.</p>
+<hr>
+<h2 dir="auto">What This Homelab Is Trying to Do</h2>
+<p dir="auto">This project is trying to answer a simple question: what would it look like to run a small home setup with the same kind of discipline used in professional environments?</p>
+<p dir="auto">That means the goal is not just "make an app run." The goal is also:</p>
+<ul dir="auto">
+<li>keep notes about important decisions</li>
+<li>separate systems so one mistake does not break everything</li>
+<li>automate repetitive setup work</li>
+<li>monitor the environment so problems are visible early</li>
+<li>recover from failures instead of pretending they will never happen</li>
+</ul>
+<p dir="auto">In plain English, this repo is less like a box of random gadgets and more like a training workshop. Every part has a job. Every change is documented. The later blog posts explain how each piece was chosen and built.</p>
+<hr>
+<h2 dir="auto">A Simple Tour of the Repo</h2>
+<p dir="auto">The easiest way to understand this repository is to treat it like a house with plans, wiring diagrams, instructions, and maintenance notes.</p>
+<h3 dir="auto"><code class="notranslate">docs/</code> — the notebook and operating manual</h3>
+<p dir="auto">This is where the explanations live.</p>
+<ul dir="auto">
+<li>the architecture notes describe how the whole system is shaped</li>
+<li>the ADRs (Architecture Decision Records) explain why important choices were made</li>
+<li>the operations docs record what changed, what broke, and how to fix common problems</li>
+<li>the blog posts turn the build into a readable story</li>
+</ul>
+<p dir="auto">If you only wanted to understand the project without touching any technology, this is the area you would read first.</p>
+<h3 dir="auto"><code class="notranslate">infra/</code> — the building plans</h3>
+<p dir="auto">This folder defines how virtual machines are created. A virtual machine is basically a computer made out of software instead of separate physical hardware.</p>
+<p dir="auto">An easy analogy: if the physical machines are the land and the building, <code class="notranslate">infra/</code> is the blueprint that says how many rooms to make, how large they should be, and what each room is for.</p>
+<h3 dir="auto"><code class="notranslate">config/</code> — the setup checklist</h3>
+<p dir="auto">Creating a machine is only the first step. It still needs to be prepared.</p>
+<p dir="auto">This folder contains the repeatable instructions that turn a fresh machine into one that is ready for its role. You can think of it like a move-in checklist: install the right basics, set the right options, and make sure each machine is prepared the same way every time.</p>
+<h3 dir="auto"><code class="notranslate">k8s/</code> — the service map</h3>
+<p dir="auto">This is where the project describes the applications and platform services that run on top of the machines.</p>
+<p dir="auto">You do not need to know Kubernetes to understand the idea. Imagine a site manager deciding which shop goes into which unit in a small business park, how traffic reaches it, and what support systems it needs. That is the kind of job this folder supports.</p>
+<h3 dir="auto"><code class="notranslate">scripts/</code> — the repeatable shortcuts</h3>
+<p dir="auto">These are small helper tools for recurring jobs, such as taking snapshots or running the same action on several systems. They are the written version of "do not rely on memory for important chores."</p>
+<hr>
+<h2 dir="auto">How the Pieces Work Together</h2>
+<p dir="auto">The stack in this repo works in layers.</p>
+<p dir="auto">First, there is the physical hardware: small computers and shared storage in the home lab.</p>
+<p dir="auto">On top of that sits software that splits those machines into smaller virtual ones. In this project, that software is Proxmox. If the hardware is an apartment building, Proxmox is the property manager dividing the space into usable apartments.</p>
+<p dir="auto">Inside those virtual machines is a lightweight Kubernetes platform called k3s. Kubernetes is a system for running and organizing applications across multiple machines. You can think of it as the coordinator that decides where things run, restarts them when they fail, and helps them find each other.</p>
+<p dir="auto">Then there are the support systems around it:</p>
+<ul dir="auto">
+<li>networking to keep traffic organized</li>
+<li>storage to keep important data safe</li>
+<li>automation to reduce manual setup work</li>
+<li>monitoring to show whether the system is healthy</li>
+<li>documentation so future decisions are not based on guesswork</li>
+</ul>
+<p dir="auto">That is the big picture of the repo. The later posts zoom into each layer one at a time.</p>
+<hr>
+<h2 dir="auto">Why the Later Posts Get More Technical</h2>
+<p dir="auto">Once you understand the big picture, the rest of the series makes more sense.</p>
+<p dir="auto">The later posts focus on questions like:</p>
+<ul dir="auto">
+<li>how do you split a home network into safer sections?</li>
+<li>how do you create servers from code instead of clicking through menus?</li>
+<li>how do you run applications across several machines?</li>
+<li>how do you know when something is broken?</li>
+</ul>
+<p dir="auto">Those posts use more technical language because they are explaining the real build choices. This post is just the map. The rest of the series is the guided tour.</p>
+<hr>
+<h2 dir="auto">What This Repo Is Really Documenting</h2>
+<p dir="auto">At a deeper level, this repository is documenting a way of thinking.</p>
+<p dir="auto">It is showing that infrastructure work is not only about typing commands. It is also about making clear decisions, writing things down, planning for failure, and building systems that can be understood later.</p>
+<p dir="auto">That is why this repo includes both code and documentation. The code says what was built. The documentation says why it was built that way.</p>
+<p dir="auto">For non-technical readers, that is the main takeaway: this project is a practical learning environment, but it is also a record of careful problem-solving.</p>
+<hr>
+<h2 dir="auto">Where to Start Next</h2>
+<p dir="auto">If you wanted a plain-language overview, you now have the core idea: this is a home-based practice environment for learning how modern infrastructure is designed, automated, and operated.</p>
+<p dir="auto">If you want the personal story behind this specific project, go next to <a href="/blog/post-01-why-i-built-a-homelab/">Post 01 — Why I Built a Homelab (and What I'm Actually Building)</a>. That post explains why this project exists, what gap it was meant to close, and how the build was planned in phases.</p>
+<p dir="auto">If you are already comfortable with infrastructure topics, you can treat this post as the front door and then jump into the later posts that match your interests.</p>
+        </article>
+
+    </main>
+</body>
+</html>
