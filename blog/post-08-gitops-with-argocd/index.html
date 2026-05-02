@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>GitOps: Deploying Applications with Argo CD | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>GitOps: Deploying Applications with Argo CD</h1>
+            <p class="post-date">2 May 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, gitops, argocd, kubernetes, helm, continuous-delivery</p>
+<p dir="auto">GitOps is one of those terms that gets used in job postings constantly and explained in blog posts abstractly. This week is my attempt at the concrete version: what GitOps actually means in day-to-day operation, and why I chose Argo CD to implement it.</p>
+<hr>
+<h2 dir="auto">What GitOps Actually Is</h2>
+<p dir="auto">GitOps is a deployment model where git is the single source of truth for desired system state. You don't deploy by running <code class="notranslate">kubectl apply</code> on your laptop. You deploy by pushing a change to git, and a tool running in the cluster detects that change and applies it.</p>
+<p dir="auto">The key shift: your deployment pipeline runs <em>inside</em> the cluster, not outside it. The cluster knows what it's supposed to look like (the git repository), continuously compares that to what it actually looks like, and reconciles any differences.</p>
+<p dir="auto">This has a few concrete consequences:</p>
+<p dir="auto"><strong>Drift detection.</strong> If someone manually runs <code class="notranslate">kubectl edit</code> and changes a deployment, Argo CD detects that the live state has drifted from the git state and shows you the diff. You can choose to sync back to git (reverting the manual change) or update git to match reality.</p>
+<p dir="auto"><strong>Auditability.</strong> Every change to the cluster goes through git — with a commit hash, an author, and optionally a PR review. "Who changed that deployment config at 2am?" becomes a git blame question, not a cluster audit log archaeology project.</p>
+<p dir="auto"><strong>Self-service.</strong> Adding a new application doesn't require SSH access to the cluster. You add the Kubernetes manifests to the git repository, commit, and Argo CD picks it up.</p>
+<hr>
+<h2 dir="auto">Why Argo CD Over Flux</h2>
+<p dir="auto">Both Argo CD and Flux implement GitOps for Kubernetes. I chose Argo CD for a few reasons:</p>
+<p dir="auto"><strong>The UI.</strong> Argo CD has a web interface that shows application sync status, resource trees, and diff views. Flux is CLI-first. For a homelab where I'm learning, the visual representation of "what's in the cluster and how is it structured" is genuinely educational. I've spent time just clicking around the Argo CD UI understanding how resources relate to each other.</p>
+<p dir="auto"><strong>RBAC model.</strong> Argo CD has a built-in RBAC system with projects and role mappings. I defined three roles: <code class="notranslate">argocd-readonly</code> (can view), <code class="notranslate">argocd-deploy</code> (can sync), <code class="notranslate">argocd-admin</code> (can manage Argo CD itself). Even in a solo homelab, modeling RBAC correctly is good practice.</p>
+<p dir="auto"><strong>App-of-apps pattern.</strong> Argo CD supports managing multiple applications through a single "meta-application" that points at a directory of application definitions. This makes adding new apps to the cluster as simple as adding a file to the repository.</p>
+<hr>
+<h2 dir="auto">Bootstrap: The One Manual Apply</h2>
+<p dir="auto">There's an inherent chicken-and-egg problem with GitOps: the tool that applies things from git has to be applied manually the first time. Argo CD is the exception to the GitOps rule — you install it imperatively, and then use it to manage everything else declaratively.</p>
+<p dir="auto">The bootstrap sequence:</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate"><span class="pl-c"><span class="pl-c">#</span> 1. Apply the argocd namespace</span>
+kubectl apply -f k8s/apps/argocd/namespace.yaml
+
+<span class="pl-c"><span class="pl-c">#</span> 2. Install Argo CD via Helm</span>
+helm repo add argo https://argoproj.github.io/argo-helm
+helm repo update
+helm upgrade --install argocd argo/argo-cd \
+  --namespace argocd \
+  -f k8s/apps/argocd/helm-values.yaml
+
+<span class="pl-c"><span class="pl-c">#</span> 3. Apply the ingress resource</span>
+kubectl apply -f k8s/apps/argocd/ingress.yaml</pre></div>
+<p dir="auto">After that, Argo CD is running at <code class="notranslate">https://argocd.lab.ls0775.com</code> and I get the initial admin password from a secret:</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate">kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath=<span class="pl-s"><span class="pl-pds">"</span>{.data.password}<span class="pl-pds">"</span></span> <span class="pl-k">|</span> base64 -d</pre></div>
+<p dir="auto">From this point forward, I manage applications through Argo CD rather than direct <code class="notranslate">kubectl apply</code>. The Helm values that configure Argo CD itself live in the git repository at <code class="notranslate">k8s/apps/argocd/helm-values.yaml</code> — so Argo CD is, in a sense, managing its own configuration.</p>
+<hr>
+<h2 dir="auto">The Helm Values in Git</h2>
+<p dir="auto">Rather than letting Helm manage Argo CD with default values, I have explicit values in <code class="notranslate">k8s/apps/argocd/helm-values.yaml</code>. This file is the configuration that matters:</p>
+<ul dir="auto">
+<li><strong>Metrics enabled</strong> for Prometheus scraping on all components (controller, server, repo-server, applicationset)</li>
+<li><strong>RBAC policy</strong> set to <code class="notranslate">role:readonly</code> by default, with explicit role mappings</li>
+<li><strong>OIDC disabled</strong> (scaffold is there, but OIDC requires an IdP that I haven't deployed yet)</li>
+<li><strong>Ingress configured</strong> for <code class="notranslate">argocd.lab.ls0775.com</code> via Traefik, using the wildcard TLS cert</li>
+</ul>
+<p dir="auto">Having these values in git means a cluster rebuild is repeatable — I'm not relying on manual configuration that lives only in the running Argo CD instance.</p>
+<hr>
+<h2 dir="auto">Drift Detection in Practice</h2>
+<p dir="auto">The most educational experience with Argo CD was seeing drift detection work on my first "oops." I'd manually patched a resource with <code class="notranslate">kubectl edit</code> to fix something quickly, intending to update the git file "later." Argo CD immediately showed the application as <code class="notranslate">OutOfSync</code> with a diff showing exactly what changed.</p>
+<p dir="auto">That visual cue — the red "OutOfSync" status in the UI — is a powerful prompt to keep git as the source of truth rather than letting manual changes accumulate. At work, this is enforced by policy. In a homelab, you have to enforce it on yourself, and Argo CD's UI makes that easier.</p>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<p dir="auto">GitOps changes the mental model from "I deploy things" to "git declares things, the cluster converges to them." That shift is subtle but important. When you're thinking about deploying something new, the question becomes "what does the git state need to look like?" rather than "what commands do I need to run?" — and that reframe makes complex deployments more systematic.</p>
+<p dir="auto">The bootstrap problem (you have to manually apply the thing that applies everything else) is also a real operational consideration that most GitOps guides gloss over. In production, you'd automate the bootstrap with a CI/CD pipeline or a dedicated bootstrapping tool. For a homelab, doing it once manually is fine — but understanding that "this part is manual" prevents the false impression that GitOps is fully automated from day zero.</p>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">With Argo CD deployed, the next thing I needed was for services to be reachable at human-readable URLs with valid TLS. That involves Traefik ingress, MetalLB, cert-manager, and Pi-hole all working together. <strong>Next:</strong> <a href="/blog/post-09-ingress-tls-service-discovery/">Post 09 — Ingress, TLS, and Service Discovery</a> — the full request path from a browser to a pod.</p>
+        </article>
+
+    </main>
+</body>
+</html>
