@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Ingress, TLS, and Service Discovery | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Ingress, TLS, and Service Discovery</h1>
+            <p class="post-date">6 May 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, kubernetes, traefik, metallb, cert-manager, tls, dns</p>
+<p dir="auto">Making a Kubernetes service accessible at a real URL with valid TLS involves more moving parts than most tutorials admit. In a cloud environment, some of those parts are handled for you. On bare metal in a homelab, you assemble them yourself. This post traces the full request path from a browser to a pod.</p>
+<hr>
+<h2 dir="auto">The Full Request Path</h2>
+<p dir="auto">When a browser on my laptop loads <code class="notranslate">https://argocd.lab.ls0775.com</code>, here's what actually happens:</p>
+<ol dir="auto">
+<li><strong>DNS resolution:</strong> My laptop queries Pi-hole at <code class="notranslate">192.168.10.10</code>. Pi-hole has a wildcard A record: <code class="notranslate">*.lab.ls0775.com → 192.168.99.100</code>.</li>
+<li><strong>TLS handshake:</strong> The browser connects to <code class="notranslate">192.168.99.100:443</code>. That IP is owned by Traefik, which terminates TLS using the <code class="notranslate">lab-wildcard-tls</code> certificate.</li>
+<li><strong>Routing:</strong> Traefik reads the <code class="notranslate">Host</code> header (<code class="notranslate">argocd.lab.ls0775.com</code>), matches it to an Ingress rule, and proxies the request to the <code class="notranslate">argocd-server</code> Service in the <code class="notranslate">argocd</code> namespace.</li>
+<li><strong>Pod:</strong> The Service load-balances to one of the Argo CD pods running on a worker node.</li>
+</ol>
+<p dir="auto">Five systems (Pi-hole, MetalLB, Traefik, cert-manager, Kubernetes Ingress) working together to make <code class="notranslate">https://argocd.lab.ls0775.com</code> resolve. Understanding this chain is the difference between debugging "why doesn't the URL work" in 30 seconds versus 30 minutes.</p>
+<hr>
+<h2 dir="auto">MetalLB: Giving Services a Real IP</h2>
+<p dir="auto">As covered in <a href="/blog/post-05-kubernetes-k3s-on-bare-metal/">Post 05 — Kubernetes on Bare Metal</a>, MetalLB assigns IPs from a reserved pool to Kubernetes <code class="notranslate">LoadBalancer</code> services. Traefik gets <code class="notranslate">192.168.99.100</code> from MetalLB. This is the IP that everything routes through.</p>
+<p dir="auto">The MetalLB configuration defines the pool in Layer 2 mode (ARP-based advertisement, simpler than BGP for a homelab):</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">apiVersion</span>: <span class="pl-s">metallb.io/v1beta1</span>
+<span class="pl-ent">kind</span>: <span class="pl-s">IPAddressPool</span>
+<span class="pl-ent">metadata</span>:
+  <span class="pl-ent">name</span>: <span class="pl-s">lab-pool</span>
+  <span class="pl-ent">namespace</span>: <span class="pl-s">metallb-system</span>
+<span class="pl-ent">spec</span>:
+  <span class="pl-ent">addresses</span>:
+    - <span class="pl-s">192.168.99.100-192.168.99.149</span>
+---
+<span class="pl-ent">apiVersion</span>: <span class="pl-s">metallb.io/v1beta1</span>
+<span class="pl-ent">kind</span>: <span class="pl-s">L2Advertisement</span>
+<span class="pl-ent">metadata</span>:
+  <span class="pl-ent">name</span>: <span class="pl-s">lab-advertisement</span>
+  <span class="pl-ent">namespace</span>: <span class="pl-s">metallb-system</span></pre></div>
+<p dir="auto">Layer 2 mode means MetalLB responds to ARP requests for the pool IPs from the node that currently owns the service. If that node goes down, MetalLB fails over the IP to another node — the failover takes a few seconds, but it's automatic.</p>
+<hr>
+<h2 dir="auto">Traefik: Ingress and TLS Termination</h2>
+<p dir="auto">k3s bundles Traefik as the default ingress controller. Traefik watches the Kubernetes API for <code class="notranslate">Ingress</code> resources and configures routing rules accordingly.</p>
+<p dir="auto">An Ingress resource for Argo CD looks like:</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">apiVersion</span>: <span class="pl-s">networking.k8s.io/v1</span>
+<span class="pl-ent">kind</span>: <span class="pl-s">Ingress</span>
+<span class="pl-ent">metadata</span>:
+  <span class="pl-ent">name</span>: <span class="pl-s">argocd</span>
+  <span class="pl-ent">namespace</span>: <span class="pl-s">argocd</span>
+  <span class="pl-ent">annotations</span>:
+    <span class="pl-ent">traefik.ingress.kubernetes.io/router.entrypoints</span>: <span class="pl-s">websecure</span>
+<span class="pl-ent">spec</span>:
+  <span class="pl-ent">tls</span>:
+    - <span class="pl-ent">hosts</span>:
+        - <span class="pl-s">argocd.lab.ls0775.com</span>
+      <span class="pl-ent">secretName</span>: <span class="pl-s">lab-wildcard-tls</span>
+  <span class="pl-ent">rules</span>:
+    - <span class="pl-ent">host</span>: <span class="pl-s">argocd.lab.ls0775.com</span>
+      <span class="pl-ent">http</span>:
+        <span class="pl-ent">paths</span>:
+          - <span class="pl-ent">path</span>: <span class="pl-s">/</span>
+            <span class="pl-ent">pathType</span>: <span class="pl-s">Prefix</span>
+            <span class="pl-ent">backend</span>:
+              <span class="pl-ent">service</span>:
+                <span class="pl-ent">name</span>: <span class="pl-s">argocd-server</span>
+                <span class="pl-ent">port</span>:
+                  <span class="pl-ent">number</span>: <span class="pl-c1">443</span></pre></div>
+<p dir="auto">Traefik sees this resource, starts listening for requests with the <code class="notranslate">argocd.lab.ls0775.com</code> Host header, and terminates TLS using the <code class="notranslate">lab-wildcard-tls</code> secret. Adding a new service to the cluster requires nothing more than creating an Ingress resource like this one — no changes to Traefik configuration, no changes to DNS.</p>
+<hr>
+<h2 dir="auto">cert-manager and the Wildcard Certificate</h2>
+<p dir="auto">TLS certificates come from cert-manager, a Kubernetes controller that manages the certificate lifecycle. cert-manager integrates with Let's Encrypt to automatically issue and renew certificates.</p>
+<p dir="auto">I'm using a single wildcard certificate for <code class="notranslate">*.lab.ls0775.com</code>. The wildcard covers every service at that domain without requiring a per-service certificate. Let's Encrypt issues wildcard certificates via DNS-01 challenge — proving domain ownership by adding a TXT record to the DNS.</p>
+<p dir="auto">The certificate is stored as a Kubernetes Secret (<code class="notranslate">lab-wildcard-tls</code>) in a central namespace and then copied to application namespaces using a Secret sync mechanism. Every new application namespace that hosts an HTTPS service needs a copy of the secret.</p>
+<p dir="auto">The alternative would be per-service certificates. Let's Encrypt rate limits certificate issuance (50 per domain per week), and managing per-service certificate lifecycle is operationally heavier. One wildcard cert, renewed automatically by cert-manager, is the right choice for a homelab scale.</p>
+<hr>
+<h2 dir="auto">Pi-hole: Wildcard DNS That Actually Scales</h2>
+<p dir="auto">The wildcard DNS record in Pi-hole is what makes service discovery effortless. Pi-hole uses <code class="notranslate">dnsmasq</code> for local DNS, and dnsmasq supports wildcard records:</p>
+<pre class="notranslate"><code class="notranslate">address=/lab.ls0775.com/192.168.99.100
+</code></pre>
+<p dir="auto">This single configuration line means every subdomain of <code class="notranslate">lab.ls0775.com</code> resolves to Traefik's MetalLB IP. Adding <code class="notranslate">newapp.lab.ls0775.com</code> requires only an Ingress resource in Kubernetes — no DNS change needed.</p>
+<p dir="auto">The pattern: <strong>all resolution goes through Pi-hole, all routing goes through Traefik</strong>. Pi-hole doesn't know about individual services. Traefik doesn't care about DNS. Each does one job well.</p>
+<hr>
+<h2 dir="auto">Deploying hello-world and homepage</h2>
+<p dir="auto">The first applications I deployed were deliberately simple: a <code class="notranslate">hello-world</code> app and a <code class="notranslate">homepage</code> dashboard.</p>
+<p dir="auto">The <code class="notranslate">hello-world</code> app is exactly what it sounds like — an nginx container serving a static page, with an Ingress resource pointing <code class="notranslate">hello-world.lab.ls0775.com</code> at it. Its purpose was to validate the full stack end-to-end before deploying anything more complex.</p>
+<p dir="auto">The <code class="notranslate">homepage</code> app is a <a href="https://gethomepage.dev" rel="nofollow">gethomepage.dev</a> dashboard — a bookmark page with service status widgets. It's served at <code class="notranslate">home.lab.ls0775.com</code> and provides a single-page view of the cluster's running services. Not a critical workload, but useful as a visual index of what's deployed.</p>
+<p dir="auto">Both apps have READMEs in <code class="notranslate">k8s/apps/</code> describing their configuration. Writing a per-app README is a discipline I'm enforcing on myself — it forces me to document what the app is, what it depends on, and how to access it.</p>
+<hr>
+<h2 dir="auto">What Went Wrong</h2>
+<p dir="auto">The trickiest issue I hit was the Argo CD <code class="notranslate">grpc</code> routing. Argo CD's CLI (<code class="notranslate">argocd login</code>) uses gRPC over HTTP/2. Traefik 2.x has some configuration requirements for gRPC passthrough that aren't in the default setup — specifically, the backend needs to be configured with the <code class="notranslate">h2c</code> protocol. Without this, the CLI works but hangs on some operations. The fix was an annotation on the Ingress resource (<code class="notranslate">traefik.ingress.kubernetes.io/service.servertransport</code>). It took a while to find because the browser UI worked fine — only the CLI was affected.</p>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<p dir="auto">The wildcard pattern — wildcard DNS + wildcard TLS + Traefik routing on <code class="notranslate">Host</code> header — is a pattern I've seen in production environments and never fully understood until I built it myself. Now it makes complete sense: you separate the "where does traffic land" problem (DNS + load balancer) from the "where does traffic go" problem (ingress routing), and each layer operates independently.</p>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">With the platform running applications, the next step was being able to see what it was doing. <strong>Next:</strong> <a href="/blog/post-10-observability-prometheus-grafana/">Post 10 — Observability: Prometheus, Grafana, and the First SLOs</a> — deploying the kube-prometheus-stack and writing the first SLO definitions for the homelab.</p>
+        </article>
+
+    </main>
+</body>
+</html>
