@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Observability: Prometheus, Grafana, and the First SLOs | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Observability: Prometheus, Grafana, and the First SLOs</h1>
+            <p class="post-date">9 May 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, prometheus, grafana, observability, sre, slo, kubernetes</p>
+<p dir="auto">Up until this point, I knew the cluster was running because I could run <code class="notranslate">kubectl get pods</code> and see green. That's not observability — that's checking your pulse with your fingers. This week is about deploying real monitoring and doing something I didn't expect: writing SLO definitions for a homelab.</p>
+<hr>
+<h2 dir="auto">What You Get Out of the Box</h2>
+<p dir="auto">The <code class="notranslate">kube-prometheus-stack</code> Helm chart is one of the more impressive pieces of Kubernetes tooling I've used. A single <code class="notranslate">helm install</code> deploys:</p>
+<ul dir="auto">
+<li><strong>Prometheus</strong> — metrics collection and storage</li>
+<li><strong>Grafana</strong> — dashboards and visualization</li>
+<li><strong>Alertmanager</strong> — alert routing and deduplication</li>
+<li><strong>Node Exporter</strong> — hardware-level metrics (CPU, memory, disk, network) on every node</li>
+<li><strong>kube-state-metrics</strong> — Kubernetes object state (is this Deployment at the desired replica count? are Pods in CrashLoopBackoff?)</li>
+<li><strong>Prometheus Operator</strong> — manages Prometheus configuration via Kubernetes CRDs</li>
+</ul>
+<p dir="auto">The chart is deployed into the <code class="notranslate">monitoring</code> namespace. After deployment, Prometheus is scraping 17 targets every 30 seconds, and Grafana comes pre-loaded with 8+ dashboards covering node health, pod health, CPU/memory, and Prometheus internals.</p>
+<p dir="auto">The first time I opened Grafana at <code class="notranslate">https://grafana.lab.ls0775.com</code> and saw real-time graphs of my cluster's CPU usage, NFS I/O, and pod restart counts, it felt like putting on glasses. I could suddenly <em>see</em> the cluster.</p>
+<hr>
+<h2 dir="auto">What the Stack Scrapes</h2>
+<p dir="auto">Prometheus collects metrics from:</p>
+<ul dir="auto">
+<li>The Kubernetes API server (<code class="notranslate">apiserver</code>) — request latency, error rates, etcd operation timing</li>
+<li><code class="notranslate">kubelet</code> on each node — pod lifecycle, container resource consumption</li>
+<li><code class="notranslate">node-exporter</code> — physical hardware metrics (disk I/O, network throughput, load average, memory pressure)</li>
+<li><code class="notranslate">kube-state-metrics</code> — object-level Kubernetes state (replica counts, job completions, pod phase)</li>
+<li><code class="notranslate">coredns</code> — DNS query rates and latency</li>
+<li><code class="notranslate">alertmanager</code> and Prometheus itself — meta-monitoring (is the monitoring system healthy?)</li>
+</ul>
+<p dir="auto">The scrape target auto-discovery is handled by the Prometheus Operator via <code class="notranslate">ServiceMonitor</code> objects. The key configuration I set:</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">prometheus</span>:
+  <span class="pl-ent">prometheusSpec</span>:
+    <span class="pl-ent">serviceMonitorSelectorNilUsesHelmValues</span>: <span class="pl-c1">false</span></pre></div>
+<p dir="auto">This makes Prometheus discover <em>all</em> <code class="notranslate">ServiceMonitor</code> objects in the cluster, not just ones matching the chart's own labels. When I add a new application and want it to expose metrics, I create a <code class="notranslate">ServiceMonitor</code> and Prometheus picks it up automatically — no Prometheus configuration change required.</p>
+<hr>
+<h2 dir="auto">Writing SLOs for a Homelab</h2>
+<p dir="auto">Here's where this project shifted from "homelab" to "production learning lab" in a concrete way: I defined Service Level Objectives.</p>
+<p dir="auto">An SLO is a target for reliability: "This service should be available 99.9% of the time over a 30-day rolling window." The measurement of whether you're meeting it is a Service Level Indicator — a specific Prometheus query that produces a number between 0 and 1.</p>
+<p dir="auto">For the homelab, I defined four:</p>
+<markdown-accessiblity-table><table role="table">
+<thead>
+<tr>
+<th>Service</th>
+<th>What We Measure</th>
+<th>Target</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Pi-hole DNS</td>
+<td>Query success rate</td>
+<td>99.9%</td>
+</tr>
+<tr>
+<td>k3s API server</td>
+<td>API availability (<code class="notranslate">up</code> metric)</td>
+<td>99.5%</td>
+</tr>
+<tr>
+<td>NFS storage</td>
+<td>Mount availability per node</td>
+<td>99.9%</td>
+</tr>
+<tr>
+<td>Argo CD UI</td>
+<td>Probe success via Blackbox Exporter</td>
+<td>99.0%</td>
+</tr>
+</tbody>
+</table></markdown-accessiblity-table>
+<p dir="auto">Writing these forced me to answer "what does 'working' mean for this service?" — which is a much harder question than it looks. For Pi-hole DNS, "working" means DNS queries are being resolved, not just that the Pod is Running. For the k3s API, "working" means the API is accepting requests, not just that the node is Up.</p>
+<p dir="auto">The SLO definitions are stored in <code class="notranslate">docs/operations/slo-definitions.md</code>. They include the Prometheus queries alongside the targets.</p>
+<hr>
+<h2 dir="auto">Error Budgets: The Math Behind "Is This Downtime OK?"</h2>
+<p dir="auto">An SLO of 99.5% means 0.5% of a 30-day window (approximately 3.6 hours) is the "error budget" — the amount of unavailability you've agreed to tolerate per month.</p>
+<p dir="auto">If the k3s API is down for 2 hours in a month, you've spent about 55% of your error budget. If it goes down again for another 2 hours the same month, you've exhausted the budget and any further downtime is "above SLO."</p>
+<p dir="auto">In a real SRE environment, this matters because it gates feature releases (if the error budget is depleted, new features that add risk are blocked until it refills) and it triggers post-mortems (budget exhaustion requires a written incident review).</p>
+<p dir="auto">In a homelab, the consequence is less severe — I'm not blocking my own releases. But tracking error budgets trains the habit of asking "what's the impact of this downtime?" rather than just "is it back up yet?" Those are very different questions, and the second one is how on-call engineers think.</p>
+<hr>
+<h2 dir="auto">The Honest Gap: Loki Is Not Deployed</h2>
+<p dir="auto">I want to be explicit about something: <strong>Prometheus tells you what is happening. It does not tell you what happened.</strong></p>
+<p dir="auto">If a pod crashed at 2am and recovered by the time I wake up, Prometheus will show a spike in container restart counts — but I can't read the logs from the crashed container. The container is gone, and without a log aggregation system, those logs are gone with it.</p>
+<p dir="auto">Loki (paired with Promtail, which ships logs from pods to Loki) is the missing piece. It would let me query historical pod logs in Grafana, enabling real post-mortem analysis: "The container crashed — why? What was it logging in the 30 seconds before the crash?"</p>
+<p dir="auto">Loki is on the Phase 4 backlog (risk register: R-004, High severity). It's not deployed yet, and I'd be misrepresenting the setup if I didn't note that. The monitoring stack is genuinely useful without Loki — Prometheus + Grafana covers the "what is happening" question well. But a production observability stack has logs, metrics, and traces. I have one of the three.</p>
+<hr>
+<h2 dir="auto">What Recording Rules Should Be (But Aren't Yet)</h2>
+<p dir="auto">The Prometheus queries in my SLO definitions run on-demand when a dashboard loads. The right approach is to precompute them as <strong>Recording Rules</strong> — Prometheus evaluates the query on a schedule and stores the result as a new time series. This reduces dashboard query latency and enables alerting on the pre-computed values.</p>
+<p dir="auto">Implementing the Recording Rules is on the backlog (risk register: R-005, Medium). The SLO definitions exist; the automation of measuring them doesn't yet. Knowing the gap is progress.</p>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<p dir="auto">SLO definitions force precision about what "working" means. The process of writing a Prometheus query that accurately captures "Pi-hole DNS is handling queries" is harder than it sounds — you have to understand the metrics the service exposes, what they mean, and what failure looks like in metric form. That precision carries over to how I think about system reliability generally.</p>
+<p dir="auto">The kube-prometheus-stack also taught me that "monitoring" and "observability" are different. Monitoring tells you when something is wrong. Observability tells you why. Prometheus + Grafana is monitoring. Logs + traces + metrics together is observability. I have the metrics layer; the full stack is still in progress.</p>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">At this point the platform is running, monitored, and deployed via GitOps. But the <em>way</em> I run it — documentation practices, decision records, risk management — is as interesting as the technology. <strong>Next:</strong> <a href="/blog/post-11-enterprise-patterns-in-a-homelab/">Post 11 — Running a Homelab Like a Production Platform</a> — what it means to run a homelab like a production platform, including the practices I've borrowed from enterprise SRE.</p>
+        </article>
+
+    </main>
+</body>
+</html>
