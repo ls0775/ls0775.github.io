@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Running a Homelab Like a Production Platform | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Running a Homelab Like a Production Platform</h1>
+            <p class="post-date">13 May 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, sre, documentation, adr, risk-register, devops, operations</p>
+<p dir="auto">The technology in this homelab — Proxmox, k3s, Argo CD, Prometheus — is the easy part to talk about. Every major component has tutorials and documentation. What I want to write about this week is the <em>operational discipline</em> layer: the practices borrowed from enterprise SRE that turn a collection of services into a platform. These are the things that differentiate "I have a homelab" from "I operate a homelab."</p>
+<hr>
+<h2 dir="auto">Architecture Decision Records</h2>
+<p dir="auto">There are 15 ADRs in this repository. An ADR is a short document that records a non-obvious technical decision: what was decided, why, and what trade-offs were accepted.</p>
+<p dir="auto">Some examples from this project:</p>
+<ul dir="auto">
+<li><strong>ADR-001:</strong> Proxmox VE over VMware ESXi — open source, API-driven, no licensing concerns post-Broadcom acquisition</li>
+<li><strong>ADR-004:</strong> k3s over kubeadm — lower operational overhead, faster path to learning GitOps and SRE</li>
+<li><strong>ADR-008:</strong> OpenTofu over Terraform — open-source fork, Linux Foundation governance, full compatibility</li>
+<li><strong>ADR-012:</strong> k3s SQLite → etcd — SQLite is a SPOF for the control plane; etcd enables multi-server HA</li>
+<li><strong>ADR-014:</strong> Single Source of Truth documentation model — stops IP addresses and status flags from duplicating across 10 files</li>
+</ul>
+<p dir="auto">The value of ADRs is not in the writing — it's in the <em>future reading</em>. Six months from now, when I'm looking at a configuration and wondering "why did I choose this?" the ADR answers that. When an AI coding assistant picks up the repository, the ADRs provide the "why" context that code alone can't.</p>
+<p dir="auto">Most importantly: ADRs are written immediately after the decision, while the context is fresh. Trying to reconstruct the reasoning six months later produces a post-hoc rationalization, not an accurate record. The discipline is writing the ADR before moving on, even when the task feels done.</p>
+<hr>
+<h2 dir="auto">The Risk Register</h2>
+<p dir="auto">The risk register is a document I didn't expect to use seriously in a homelab — it felt like an enterprise formality. I was wrong.</p>
+<p dir="auto">The homelab has seven documented risks:</p>
+<markdown-accessiblity-table><table role="table">
+<thead>
+<tr>
+<th>ID</th>
+<th>Risk</th>
+<th>Severity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>R-001</td>
+<td>2-node etcd quorum is not truly HA</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>R-002</td>
+<td>OpenTofu state file lives on one workstation</td>
+<td>Critical</td>
+</tr>
+<tr>
+<td>R-003</td>
+<td>All backups are on-site (Synology)</td>
+<td>High</td>
+</tr>
+<tr>
+<td>R-004</td>
+<td>No log aggregation (Loki not deployed)</td>
+<td>High</td>
+</tr>
+<tr>
+<td>R-005</td>
+<td>SLOs defined but not automatically measured</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>R-006</td>
+<td>No CI/CD for infrastructure (manual tofu apply)</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>R-007</td>
+<td>Static x509 certs (no centralized identity)</td>
+<td>Low</td>
+</tr>
+</tbody>
+</table></markdown-accessiblity-table>
+<p dir="auto">Writing these down did several things. First, it forced me to be explicit about what I know is broken. R-001 and R-002 are Critical risks that I'm operating with knowingly — that's different from not knowing about them. Second, it gave me a prioritized backlog: R-002 (MinIO for remote state) and R-004 (Loki) are the highest-priority unfinished work. Third, it gave me something to show an employer that demonstrates I think about reliability beyond "does it work right now?"</p>
+<p dir="auto">The risk register lives in <code class="notranslate">docs/operations/risk-register.md</code> and is updated when risks are mitigated or new risks are identified. It's not a document you write once and forget — it's an active artifact.</p>
+<hr>
+<h2 dir="auto">Single Source of Truth Documentation</h2>
+<p dir="auto">Documentation duplication is a bug. The same IP address appearing in five different files is the documentation equivalent of copy-pasted code — the moment one copy gets updated, the others drift out of sync.</p>
+<p dir="auto">ADR-014 established a Single Source of Truth model for this repo:</p>
+<ul dir="auto">
+<li><strong><code class="notranslate">docs/environment-data.md</code></strong> — canonical location for all IPs, VLAN IDs, hardware specs, hostnames. Every other document links here rather than repeating the values.</li>
+<li><strong><code class="notranslate">PLAN.md</code></strong> — canonical location for project status, phase tracking, what's done, what's next.</li>
+<li><strong><code class="notranslate">docs/adr/</code></strong> — canonical location for architectural decisions.</li>
+<li><strong><code class="notranslate">docs/archive/phase-*/</code></strong> — historical build logs (how things were set up), not kept current.</li>
+</ul>
+<p dir="auto">This feels obvious when you say it, but implementing it required moving content around and adding the discipline of "don't put facts here, link to the SSoT." The payoff is real: when I added a k3s worker node, I updated <code class="notranslate">docs/environment-data.md</code> once, and every other document that links to it is automatically current.</p>
+<hr>
+<h2 dir="auto">The Handoff Log</h2>
+<p dir="auto">This is one of the practices I'm most proud of, and the one that most directly demonstrates a production SRE mindset.</p>
+<p dir="auto">In professional SRE, "on-call handoff" is a formal process. The engineer ending their on-call shift documents what happened, what's still in progress, and what the next engineer needs to know to operate safely. This prevents the next person (or the next AI agent session) from wasting time reconstructing context that the previous shift already had.</p>
+<p dir="auto">ADR-015 formalized a daily platform handoff log for this homelab at <code class="notranslate">docs/operations/handoff-log.md</code>. Each entry covers:</p>
+<ol dir="auto">
+<li>Significant changes made</li>
+<li>Unfinished business and next steps</li>
+<li>Active blocking risks</li>
+<li>Platform status (cluster up? backups firing? any observability gaps?)</li>
+</ol>
+<p dir="auto">The primary audience is my future self (or the AI agents I work with) picking up the project after time away. The format treats that future self like a new team member who needs context to operate safely, not like someone who remembers everything from last time.</p>
+<p dir="auto">The discipline: write the handoff entry before closing the session, even if it's short, even if nothing major happened. The habit of writing context down is more valuable than any individual entry.</p>
+<hr>
+<h2 dir="auto">AI Agents as Engineering Collaborators</h2>
+<p dir="auto">This project is built with AI coding assistants as active collaborators — primarily Claude Code, with some Gemini sessions. I want to be transparent about this rather than presenting the work as purely solo.</p>
+<p dir="auto">The AI does not design the architecture or make decisions. It implements, documents, and reasons about the implications of choices I've already made. The Architecture Decision Records, risk register, and SLO definitions are all decisions I made; the AI helped articulate them and implement the documentation structure.</p>
+<p dir="auto">What AI assistance changes is the <em>operational</em> pattern: I can pick up the project after a week off, give the AI the handoff log and relevant ADRs as context, and continue efficiently. The AI catches inconsistencies in documentation, suggests implications I haven't considered, and can read the entire repository in a way that I (as a human) can only partially keep in memory.</p>
+<p dir="auto">The repository structure is explicitly designed around this collaboration: the SSoT model reduces AI hallucination (contradictory facts in multiple files confuse AI agents), the handoff log provides context across sessions, and the ADRs prevent re-litigating settled decisions.</p>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<p dir="auto">Enterprise practices exist for reasons. ADRs, risk registers, SLO definitions, and handoff logs aren't bureaucratic overhead — they're tools for operating complex systems reliably over time. A homelab is complex enough to benefit from all of them, even at small scale.</p>
+<p dir="auto">The practices also compound: a risk register is more useful when it references ADRs. A handoff log is more useful when it references the risk register. Documentation discipline isn't a separate "non-technical" activity — it's infrastructure for the engineering work itself.</p>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">The final post in this series is about what's actually left to build: MinIO, Loki, a third etcd node, and the things I'd do differently if starting over. <strong>Next:</strong> <a href="/blog/post-12-whats-next-loki-minio-and-beyond/">Post 12 — What's Next: Loki, MinIO, and the Road to Phase 5</a> — Phase 4 and Phase 5, and an honest reflection on the project so far.</p>
+        </article>
+
+    </main>
+</body>
+</html>
