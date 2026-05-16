@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>What's Next: Loki, MinIO, and the Road to Phase 5 | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>What's Next: Loki, MinIO, and the Road to Phase 5</h1>
+            <p class="post-date">16 May 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, loki, minio, kubernetes, sre, devops, reflection</p>
+<p dir="auto">This is the last post in the "building the platform" arc of this series. The cluster is operational, GitOps is wired up, monitoring is running. But operational doesn't mean done — there are two Critical-severity gaps that need addressing, and a Phase 5 plan for closing the remaining architectural debt. This post covers what's left and what I've learned from the build so far.</p>
+<hr>
+<h2 dir="auto">The Two Critical Gaps</h2>
+<h3 dir="auto">R-002: OpenTofu State on a Single Workstation</h3>
+<p dir="auto">The <code class="notranslate">infra/terraform.tfstate</code> file lives on my DevOps workstation. This file is OpenTofu's record of everything it has created — the mapping between HCL declarations and actual Proxmox VMs. Without it, OpenTofu can't manage the infrastructure it created. If my workstation dies (drive failure, theft, a really bad <code class="notranslate">rm -rf</code> mistake), I lose the ability to make OpenTofu changes cleanly. Recovery is possible via <code class="notranslate">tofu import</code>, but it's tedious and error-prone for a multi-VM setup.</p>
+<p dir="auto">The fix is a <strong>remote state backend</strong> — a central server that stores the state file, accessible from any machine, with locking to prevent concurrent applies from corrupting it.</p>
+<p dir="auto">The tool for this in a self-hosted environment is <strong>MinIO</strong> — an open-source object storage server that exposes an S3-compatible API. OpenTofu's S3 backend works with MinIO without modification:</p>
+<div class="highlight highlight-source-hcl" dir="auto"><pre class="notranslate"><span class="pl-en">terraform</span> {
+  <span class="pl-en">backend</span> <span class="pl-smi">"s3"</span> {
+    <span class="pl-v"><span class="pl-smi">bucket</span> <span class="pl-k">=</span> </span><span class="pl-s"><span class="pl-pds">"</span>tofu-state<span class="pl-pds">"</span></span>
+    <span class="pl-v"><span class="pl-smi">key</span>    <span class="pl-k">=</span> </span><span class="pl-s"><span class="pl-pds">"</span>homelab/terraform.tfstate<span class="pl-pds">"</span></span>
+    <span class="pl-v"><span class="pl-smi">region</span> <span class="pl-k">=</span> </span><span class="pl-s"><span class="pl-pds">"</span>us-east-1<span class="pl-pds">"</span></span>  <span class="pl-c"><span class="pl-c">#</span> required field, arbitrary for MinIO<span class="pl-c"></span></span>
+    
+    <span class="pl-v"><span class="pl-smi">endpoint</span>                    <span class="pl-k">=</span> </span><span class="pl-s"><span class="pl-pds">"</span>https://minio.lab.ls0775.com<span class="pl-pds">"</span></span>
+    <span class="pl-v"><span class="pl-smi">skip_credentials_validation</span> <span class="pl-k">=</span> </span><span class="pl-c1">true</span>
+    <span class="pl-v"><span class="pl-smi">skip_metadata_api_check</span>     <span class="pl-k">=</span> </span><span class="pl-c1">true</span>
+    <span class="pl-v"><span class="pl-smi">force_path_style</span>            <span class="pl-k">=</span> </span><span class="pl-c1">true</span>
+  }
+}</pre></div>
+<p dir="auto">MinIO will be deployed as a Kubernetes workload in the <code class="notranslate">storage</code> namespace, using the Synology NFS mount for persistence. Once it's up, migrating the state backend is a one-time <code class="notranslate">tofu init -reconfigure</code> that copies the existing state file to the new backend.</p>
+<p dir="auto">This is Priority 1 for Phase 4.</p>
+<hr>
+<h3 dir="auto">R-004: No Log Aggregation</h3>
+<p dir="auto">Prometheus tells you what is happening right now. It doesn't tell you what was happening when the pod crashed at 3am last Tuesday. Without log aggregation, historical troubleshooting is impossible — you're limited to whatever the running container currently has in its log buffer.</p>
+<p dir="auto"><strong>Loki</strong> is the log aggregation system built to complement Prometheus. It stores log streams indexed by labels (namespace, pod name, container) and exposes a query language (LogQL) that mirrors PromQL syntax. Grafana has native Loki support — you can correlate a spike in error metrics with the log lines from the same time window in a single dashboard.</p>
+<p dir="auto"><strong>Promtail</strong> is the log shipping agent — a DaemonSet that runs on every node, reads container logs from <code class="notranslate">/var/log/pods/</code>, and ships them to Loki.</p>
+<p dir="auto">The deployment plan:</p>
+<ol dir="auto">
+<li>Deploy Loki in the <code class="notranslate">monitoring</code> namespace (same as Prometheus/Grafana)</li>
+<li>Deploy Promtail as a DaemonSet on all nodes</li>
+<li>Add Loki as a Grafana datasource</li>
+<li>Write initial LogQL queries for the most useful views: error rates by namespace, k3s API server logs, etcd logs</li>
+</ol>
+<p dir="auto">Once Loki is deployed, the observability stack is metrics + logs. The third pillar (distributed tracing) is out of scope for this project's scale — tracing is most valuable in microservices architectures with complex call graphs, which doesn't describe a homelab with a handful of apps.</p>
+<hr>
+<h2 dir="auto">Phase 5: Closing the Remaining Debt</h2>
+<h3 dir="auto">R-001: Third etcd Node</h3>
+<p dir="auto">The 2-node etcd cluster is the biggest architectural debt. It's documented, understood, and accepted as a temporary state — but it's temporary.</p>
+<p dir="auto">The plan: deploy a third k3s server node as a VM on the Synology VMM. This node will be:</p>
+<ul dir="auto">
+<li><strong>Tainted</strong> — marked so no application workloads schedule on it (only control-plane components)</li>
+<li><strong>Lightly resourced</strong> — enough for etcd replication (2 vCPU, 2GB RAM), not sized for workloads</li>
+<li><strong>Cross-failure-domain</strong> — running on the Synology rather than pve01 or pve02, so losing either NUC still leaves two etcd members</li>
+</ul>
+<p dir="auto">With three etcd members, the cluster can tolerate losing any single member (including the Synology VM) and continue operating. That's true HA for the control plane.</p>
+<h3 dir="auto">R-003: Off-Site Backups</h3>
+<p dir="auto">The Synology NAS holds etcd snapshots, VM backups, and the only copy of several years of personal data. A house-level event (fire, power surge, flood) would wipe all of it simultaneously.</p>
+<p dir="auto">The fix: encrypted off-site sync. The candidates are AWS S3 (Glacier or Intelligent-Tiering for cost optimization), Backblaze B2 (cheaper per-GB than S3), or Cloudflare R2 (free egress). The implementation is a scheduled backup job that encrypts with age or GPG before uploading, so the cloud provider never has plaintext data.</p>
+<h3 dir="auto">R-006: GitHub Actions for Infrastructure CI/CD</h3>
+<p dir="auto">Currently, <code class="notranslate">tofu plan</code> and <code class="notranslate">tofu apply</code> run manually from my workstation. There's no automated check that pull requests are consistent with the Proxmox state, and no guardrails against applying a bad change without review.</p>
+<p dir="auto">The Phase 5 plan: GitHub Actions pipeline that runs <code class="notranslate">tofu plan</code> on every PR targeting <code class="notranslate">main</code> and posts the plan output as a PR comment. <code class="notranslate">tofu apply</code> remains a manual step (requiring deliberate approval) but the plan check is automated. This brings the infrastructure workflow in line with how most organizations handle IaC — automated plan, human-approved apply.</p>
+<hr>
+<h2 dir="auto">What I'd Do Differently</h2>
+<p dir="auto">If I were starting this project again from scratch, three things would change:</p>
+<p dir="auto"><strong>MinIO first.</strong> The remote state backend should be deployed before the first <code class="notranslate">tofu apply</code>, not as a retrofit. Migrating state backends is straightforward, but starting with local state creates an unnecessary window of risk.</p>
+<p dir="auto"><strong>Three etcd nodes from the start.</strong> The 2-to-3 node etcd migration is not difficult, but it would have been easier to design for 3 nodes upfront than to add the third one to an existing 2-node cluster. The Synology VMM was always available; using it from day one for the third control-plane node would have eliminated R-001 entirely.</p>
+<p dir="auto"><strong>Loki alongside Prometheus.</strong> I deployed Prometheus first and planned to add Loki "later." Later has been several weeks. Deploying them together from the start would have avoided several incidents where I had no historical log context for troubleshooting.</p>
+<hr>
+<h2 dir="auto">What This Project Taught Me</h2>
+<p dir="auto">The technology is the easy part. Kubernetes, Prometheus, Ansible, Argo CD — these are well-documented tools with active communities. The hard part is the operational discipline: deciding what the right architecture is, documenting why, tracking what's broken, and building the habits that make a system manageable over time.</p>
+<p dir="auto">The single most valuable habit from this project is writing things down immediately — ADRs when you make a decision, risk register entries when you identify a gap, handoff log entries when you end a session. The compounding effect of that documentation is that six months from now, I can come back to this system and understand it. Without the documentation, I'd be reverse-engineering my own infrastructure.</p>
+<p dir="auto">This series documents a real build, with real gaps. R-001, R-002, R-003, R-004 — these are the things I'm not proud of, the places where the architecture isn't where I want it. Putting them in a public blog post rather than hiding them is deliberate: a portfolio piece that only shows the polished version is less credible than one that demonstrates you know what's wrong and have a plan to fix it.</p>
+<hr>
+<h2 dir="auto">What Comes Next in This Blog</h2>
+<p dir="auto">Phase 4 is in progress. The next posts will document deploying MinIO, wiring up the S3 backend for OpenTofu, and deploying Loki. When Phase 5 starts — the third etcd node, off-site backups, GitHub Actions — that'll be covered too.</p>
+<p dir="auto">Before MinIO, there was some important groundwork: evolving the Ansible inventory structure, finding and fixing configuration drift across servers, and codifying the control node workstation as infrastructure. <strong>Next:</strong> <a href="/blog/post-13-ansible-inventory-and-drift/">Post 13 — Ansible Inventory Design and Finding Configuration Drift</a>.</p>
+<p dir="auto">If you've made it through all 12 posts: the repository is at <a href="https://github.com/ls0775/homelab">github.com/ls0775/homelab</a> (coming in Phase 5, once the secrets sweep and IP scrubbing is complete). The architecture decisions, risk register, SLO definitions, and ADRs that this series references are all real documents in that repository.</p>
+<p dir="auto">The build continues.</p>
+        </article>
+
+    </main>
+</body>
+</html>
