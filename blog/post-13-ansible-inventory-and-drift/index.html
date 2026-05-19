@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Ansible Inventory Design and Finding Configuration Drift | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Ansible Inventory Design and Finding Configuration Drift</h1>
+            <p class="post-date">19 May 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, ansible, configuration-management, idempotency, devops, drift-detection, k3s</p>
+<p dir="auto">I thought Ansible was keeping my servers consistent. Then I ran a diff of manually installed packages between two supposedly identical control-plane nodes and found one had helm and the other didn't. Nobody had noticed. This post is about how that happened, how to systematically find it, and how to prevent it from happening again.</p>
+<hr>
+<h2 dir="auto">How Drift Happens</h2>
+<p dir="auto">Drift is what happens when the actual state of your infrastructure diverges from the state described in your code. In this homelab, the pattern is familiar: you SSH into a server to fix something urgently, install a package to test a theory, and then move on. The fix works. You forget to update the playbook.</p>
+<p dir="auto">Six months later, you provision a second server from the playbook. It doesn't have the package. Things work differently between the two nodes, and the reason isn't obvious because the two playbooks are identical — the drift lives outside both of them.</p>
+<p dir="auto">Helm was the example here. I had installed it manually on <code class="notranslate">k3s-server-01</code> early on, long before the Ansible playbook for that server was written. The playbook was written later, based on what I thought the server needed — but helm never made it in. <code class="notranslate">k3s-server-02</code> was provisioned entirely from the playbook and came out without helm. Two supposedly equivalent control-plane nodes, subtly different.</p>
+<hr>
+<h2 dir="auto">Finding Manual Drift</h2>
+<p dir="auto">There are two dimensions of drift to find: things Ansible knows about (has tasks for) but where the live state doesn't match, and things Ansible doesn't know about at all.</p>
+<h3 dir="auto">What Ansible doesn't know about</h3>
+<p dir="auto"><code class="notranslate">apt-mark showmanual</code> lists packages that were explicitly installed by a human (not pulled in as a dependency). Diffing two servers immediately shows what's inconsistent:</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate">diff <span class="pl-s"><span class="pl-pds">&lt;(</span>ssh k3s-server-01 <span class="pl-s"><span class="pl-pds">"</span>apt-mark showmanual | sort<span class="pl-pds">"</span></span><span class="pl-pds">)</span></span> \
+     <span class="pl-s"><span class="pl-pds">&lt;(</span>ssh k3s-server-02 <span class="pl-s"><span class="pl-pds">"</span>apt-mark showmanual | sort<span class="pl-pds">"</span></span><span class="pl-pds">)</span></span></pre></div>
+<p dir="auto">The output in this case showed that <code class="notranslate">k3s-server-01</code> had <code class="notranslate">helm</code>, <code class="notranslate">btop</code>, <code class="notranslate">gh</code>, <code class="notranslate">gitleaks</code>, <code class="notranslate">gnupg</code>, <code class="notranslate">build-essential</code>, <code class="notranslate">pipx</code>, and <code class="notranslate">tofu</code> — none of which were in any playbook. Some of those (like <code class="notranslate">btop</code>) belonged on the control node workstation, not the server. Others (like <code class="notranslate">helm</code>) were genuinely missing from the server playbooks.</p>
+<p dir="auto">The same check on apt sources reveals repos that were added manually:</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate">diff <span class="pl-s"><span class="pl-pds">&lt;(</span>ssh k3s-server-01 <span class="pl-s"><span class="pl-pds">"</span>ls /etc/apt/sources.list.d/ | sort<span class="pl-pds">"</span></span><span class="pl-pds">)</span></span> \
+     <span class="pl-s"><span class="pl-pds">&lt;(</span>ssh k3s-server-02 <span class="pl-s"><span class="pl-pds">"</span>ls /etc/apt/sources.list.d/ | sort<span class="pl-pds">"</span></span><span class="pl-pds">)</span></span></pre></div>
+<h3 dir="auto">What Ansible knows about but hasn't applied</h3>
+<p dir="auto"><code class="notranslate">ansible-playbook --check</code> runs a playbook in dry-run mode — it reports what <em>would</em> change without making any changes. Every task showing <code class="notranslate">changed</code> is real drift:</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate">ansible-playbook --check -i inventory/hosts.yaml playbooks/k3s-server-01.yaml</pre></div>
+<p dir="auto">Running this revealed six items I hadn't known about:</p>
+<ul dir="auto">
+<li>The etcd snapshots directory had <code class="notranslate">0700</code> permissions; the playbook wanted <code class="notranslate">0750</code></li>
+<li>The k3s token file had <code class="notranslate">0600</code>; the playbook wanted <code class="notranslate">0640</code> (group-readable by <code class="notranslate">k3s-admins</code>)</li>
+<li>The etcd rsync cron was set to fire at minute <code class="notranslate">0</code>; the playbook specified minute <code class="notranslate">30</code></li>
+<li>The cron itself had no Ansible name tag — it was added manually, outside Ansible's awareness</li>
+<li>A sudoers rule (<code class="notranslate">/etc/sudoers.d/ansible</code>) existed on <code class="notranslate">k3s-server-01</code> but not <code class="notranslate">k3s-server-02</code></li>
+<li><code class="notranslate">/etc/rancher/k3s/config.yaml</code> would have been overwritten on re-run (a playbook bug — see below)</li>
+</ul>
+<hr>
+<h2 dir="auto">Fixing the Playbook Bugs</h2>
+<p dir="auto">Two bugs in the server playbooks were found during this process.</p>
+<p dir="auto"><strong>Bug 1: The config.yaml overwrite problem.</strong> The server bootstrap playbook used <code class="notranslate">ansible.builtin.copy</code> with hardcoded content for <code class="notranslate">/etc/rancher/k3s/config.yaml</code>. A separate <code class="notranslate">k3s-enable-metrics.yaml</code> playbook (run later) adds a metrics block to the same file using <code class="notranslate">blockinfile</code>. If the bootstrap playbook was ever re-run, it would silently overwrite the metrics block — and <code class="notranslate">copy</code> has no concept of "leave existing content alone."</p>
+<p dir="auto">The fix: <code class="notranslate">force: false</code> on the copy task. This tells Ansible to only write the file if it doesn't already exist. The bootstrap playbook creates the initial config; the metrics playbook manages its own block after that.</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate">- <span class="pl-ent">name</span>: <span class="pl-s">Write k3s config.yaml</span>
+  <span class="pl-ent">ansible.builtin.copy</span>:
+    <span class="pl-ent">dest</span>: <span class="pl-s">/etc/rancher/k3s/config.yaml</span>
+    <span class="pl-ent">force</span>: <span class="pl-c1">false</span>
+    <span class="pl-ent">content</span>: <span class="pl-s">|</span>
+<span class="pl-s">      ...</span></pre></div>
+<p dir="auto"><strong>Bug 2: Orphaned cron entries.</strong> The rsync cron for etcd snapshots was added manually with no Ansible name tag. Ansible's <code class="notranslate">cron</code> module identifies entries by a name comment (<code class="notranslate">#Ansible: &lt;name&gt;</code>). Without it, Ansible doesn't know the cron exists and would add a second, duplicate entry on the next run. The fix: delete the orphaned entry on each server, then let Ansible add the named version.</p>
+<hr>
+<h2 dir="auto">Evolving the Inventory Structure</h2>
+<p dir="auto">The original inventory was flat — all k3s servers in one <code class="notranslate">k3s_servers</code> group, all agents in <code class="notranslate">k3s_agents</code>. This caused a problem: <code class="notranslate">k3s-server-03</code> is a quorum device running on a Synology VM, not a full control-plane node. Running the server playbook (which installs helm, configures NFS, sets up etcd snapshot rsync) against it would be wrong.</p>
+<p dir="auto">Ansible supports hierarchical groups natively:</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">k3s_servers</span>:
+  <span class="pl-ent">children</span>:
+    <span class="pl-ent">k3s_control_plane</span>:
+      <span class="pl-ent">hosts</span>:
+        <span class="pl-ent">k3s-server-01</span>:
+          <span class="pl-ent">ansible_host</span>: <span class="pl-s">192.168.99.21</span>
+        <span class="pl-ent">k3s-server-02</span>:
+          <span class="pl-ent">ansible_host</span>: <span class="pl-s">192.168.99.22</span>
+    <span class="pl-ent">k3s_qdevice</span>:
+      <span class="pl-ent">hosts</span>:
+        <span class="pl-ent">k3s-server-03</span>:
+          <span class="pl-ent">ansible_host</span>: <span class="pl-s">192.168.10.23</span></pre></div>
+<p dir="auto">With this structure, <code class="notranslate">k3s_servers</code> still matches all server nodes (useful for <code class="notranslate">ansible k3s_servers -m ping</code>), but playbooks can now target <code class="notranslate">k3s_control_plane</code> specifically. The same pattern applies to Proxmox — <code class="notranslate">proxmox_nodes</code> for the full Proxmox VE hosts, <code class="notranslate">proxmox_qdevice</code> for the Ubuntu VM running the quorum daemon.</p>
+<p dir="auto">The final inventory structure:</p>
+<pre class="notranslate"><code class="notranslate">all
+├── control_node         (localhost — workstation)
+├── k3s_servers
+│   ├── k3s_control_plane   (k3s-server-01, 02)
+│   └── k3s_qdevice         (k3s-server-03)
+├── k3s_agents           (k3s-agent-01, 02)
+└── proxmox
+    ├── proxmox_nodes    (pve01, pve02)
+    └── proxmox_qdevice  (pve03)
+</code></pre>
+<p dir="auto">The <code class="notranslate">k3s-enable-metrics.yaml</code> playbook, which had been targeting <code class="notranslate">k3s_servers</code>, was updated to target <code class="notranslate">k3s_control_plane</code> — metrics apply only to the full control-plane nodes, not the quorum device.</p>
+<hr>
+<h2 dir="auto">Codifying What Was Missing</h2>
+<p dir="auto">After finding the drift, the fixes went into the playbooks:</p>
+<p dir="auto"><strong>Helm</strong> was added to both server playbooks with the full apt repo setup — key download, source file, package install. Idempotent because the key task uses <code class="notranslate">creates:</code> (only runs if the keyring doesn't exist) and the apt task is always idempotent by default.</p>
+<p dir="auto"><strong>Sudoers rule</strong> was added as a task using <code class="notranslate">ansible.builtin.copy</code> with <code class="notranslate">validate: /usr/sbin/visudo -cf %s</code>. The validate parameter runs visudo on the file before writing it — if the syntax is invalid, Ansible aborts without writing a broken sudoers file. A scoped rule (not a broad <code class="notranslate">NOPASSWD:ALL</code>) lets the ansible user read the k3s token without full root access:</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate">- <span class="pl-ent">name</span>: <span class="pl-s">Add scoped sudoers rule for Ansible token access</span>
+  <span class="pl-ent">ansible.builtin.copy</span>:
+    <span class="pl-ent">dest</span>: <span class="pl-s">/etc/sudoers.d/ansible</span>
+    <span class="pl-ent">content</span>: <span class="pl-s"><span class="pl-pds">"</span>ls0775 ALL=(root) NOPASSWD: /usr/bin/cat /var/lib/rancher/k3s/server/token<span class="pl-cce">\n</span><span class="pl-pds">"</span></span>
+    <span class="pl-ent">mode</span>: <span class="pl-s"><span class="pl-pds">'</span>0440<span class="pl-pds">'</span></span>
+    <span class="pl-ent">validate</span>: <span class="pl-s">/usr/sbin/visudo -cf %s</span></pre></div>
+<p dir="auto"><strong>The broad <code class="notranslate">NOPASSWD:ALL</code> rule</strong> — which makes <code class="notranslate">become: true</code> work without <code class="notranslate">--ask-become-pass</code> on the servers — comes from cloud-init, not Ansible. It's set in the OpenTofu VM provisioning config and applied at first boot. That's the right place for it: it's a provisioning concern, not a configuration management concern.</p>
+<hr>
+<h2 dir="auto">The <code class="notranslate">ansible.cfg</code> Default</h2>
+<p dir="auto">One small quality-of-life improvement: an <code class="notranslate">ansible.cfg</code> file in the <code class="notranslate">config/</code> directory:</p>
+<div class="highlight highlight-source-ini" dir="auto"><pre class="notranslate"><span class="pl-en">[defaults]</span>
+<span class="pl-k">inventory</span> = inventory/hosts.yaml
+<span class="pl-k">deprecation_warnings</span> = False
+<span class="pl-k">host_key_checking</span> = False
+
+<span class="pl-en">[privilege_escalation]</span>
+<span class="pl-k">become</span> = True
+<span class="pl-k">become_method</span> = sudo</pre></div>
+<p dir="auto"><code class="notranslate">inventory</code> sets the default so <code class="notranslate">-i inventory/hosts.yaml</code> no longer needs to be typed on every command. <code class="notranslate">host_key_checking = False</code> prevents new hosts from blocking on the SSH fingerprint prompt — useful when adding new nodes to inventory.</p>
+<hr>
+<h2 dir="auto">The Workflow Going Forward</h2>
+<p dir="auto">The discipline is: after any manual change on a server, update the playbook before closing the session. The check mode acts as a verification:</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate"><span class="pl-c"><span class="pl-c">#</span> Did I capture everything?</span>
+ansible-playbook --check playbooks/k3s-server-01.yaml
+ansible-playbook --check playbooks/k3s-server-02.yaml
+<span class="pl-c"><span class="pl-c">#</span> Expected: changed=0 on both</span></pre></div>
+<p dir="auto"><code class="notranslate">changed=0</code> means the playbook fully describes the live state. Any non-zero count is a prompt to investigate — either the playbook is missing something, or the live server has drift that needs to be either codified or reverted.</p>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<p dir="auto">Drift is invisible until you look for it. The two servers had been running in production (or homelab production) for weeks with this inconsistency, and nothing had broken — because the workloads running on them didn't need helm on the node. But the next time a server was rebuilt from the playbook, it would be subtly different from the existing one in a way that would have been hard to diagnose.</p>
+<p dir="auto">The check mode workflow is the equivalent of a linter for infrastructure state. Running it routinely is cheap. Discovering drift in production during an incident is expensive.</p>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">With the servers consistent and the inventory properly structured, the next question was the control node itself: my workstation. If the servers need Ansible playbooks, does the workstation? Yes. <strong>Next:</strong> <a href="/blog/post-14-control-node-as-infrastructure/">Post 14 — The Control Node is Infrastructure Too</a> — bootstrapping the workstation with the same discipline applied to the servers.</p>
+        </article>
+
+    </main>
+</body>
+</html>
