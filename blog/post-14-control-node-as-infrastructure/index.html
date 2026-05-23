@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>The Control Node is Infrastructure Too | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>The Control Node is Infrastructure Too</h1>
+            <p class="post-date">23 May 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, ansible, devops, workstation, kubectl, k3s, wsl, configuration-management</p>
+<p dir="auto">Every server in this homelab is defined by code. The k3s nodes have Ansible playbooks. The Proxmox VMs have OpenTofu configuration. But the machine running all of those tools — the workstation — had nothing. Its state was entirely undocumented: tools installed by hand over time, repos added ad hoc, no record of what was needed or why. If I had to rebuild it, I'd spend hours figuring out what belonged on it. This post is about fixing that.</p>
+<hr>
+<h2 dir="auto">The Control Node Pattern</h2>
+<p dir="auto">In enterprise environments, IaC and configuration management run from a designated control node — a CI/CD runner, a bastion host, or a developer workstation. The control node is not a managed node. It is the operator plane: the machine from which all infrastructure is managed.</p>
+<p dir="auto">ADR-013 established this pattern for the homelab: OpenTofu and Ansible run exclusively from the engineer's workstation. Infrastructure nodes (pve01, pve02, k3s nodes) must not have the homelab repo cloned or IaC tooling installed. The reasons:</p>
+<ul dir="auto">
+<li><strong>Separation of concerns:</strong> The tool that provisions infrastructure should not run on the infrastructure it manages. If pve01 is lost, the ability to rebuild it must not be lost with it.</li>
+<li><strong>Blast radius:</strong> A mistake on an infrastructure node — wrong <code class="notranslate">tofu destroy</code>, misconfigured credentials — can cascade into the cluster it's managing. Running from a workstation contains that blast radius.</li>
+<li><strong>Audit trail:</strong> All applies and playbook runs come from one place, with one identity, traceable to one operator.</li>
+</ul>
+<p dir="auto">What ADR-013 didn't originally address: the workstation itself needs the same documentation discipline as the nodes it manages. If the toolchain isn't codified, the control node is a single point of failure with no recovery playbook.</p>
+<hr>
+<h2 dir="auto">What Belongs on a Control Node</h2>
+<p dir="auto">The workstation needs a specific set of tools to manage this stack:</p>
+<markdown-accessiblity-table><table role="table">
+<thead>
+<tr>
+<th>Tool</th>
+<th>Purpose</th>
+<th>Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code class="notranslate">ansible</code></td>
+<td>Configuration management of all nodes</td>
+<td><code class="notranslate">apt install ansible</code></td>
+</tr>
+<tr>
+<td><code class="notranslate">kubectl</code></td>
+<td>k3s cluster operations</td>
+<td>Kubernetes apt repo (<code class="notranslate">pkgs.k8s.io</code>)</td>
+</tr>
+<tr>
+<td><code class="notranslate">helm</code></td>
+<td>Chart management for k3s workloads</td>
+<td>Buildkite helm apt repo</td>
+</tr>
+<tr>
+<td><code class="notranslate">tofu</code></td>
+<td>Proxmox VM provisioning</td>
+<td>OpenTofu apt repo</td>
+</tr>
+<tr>
+<td><code class="notranslate">k9s</code></td>
+<td>Terminal UI for cluster operations</td>
+<td>GitHub binary release</td>
+</tr>
+<tr>
+<td><code class="notranslate">gh</code></td>
+<td>GitHub CLI for repo workflow</td>
+<td>GitHub CLI apt repo</td>
+</tr>
+<tr>
+<td><code class="notranslate">gitleaks</code></td>
+<td>Pre-commit secrets scanning</td>
+<td>Ubuntu universe</td>
+</tr>
+<tr>
+<td><code class="notranslate">git</code>, <code class="notranslate">curl</code>, <code class="notranslate">gnupg</code></td>
+<td>Baseline tooling</td>
+<td>Ubuntu default repos</td>
+</tr>
+</tbody>
+</table></markdown-accessiblity-table>
+<p dir="auto">A few things worth noting about this list:</p>
+<p dir="auto"><code class="notranslate">kubectl</code> comes from <code class="notranslate">pkgs.k8s.io</code> — the standard Kubernetes package repository. This is the correct place to get it even though the cluster is k3s, not k8s. kubectl is a client binary; it's identical whether your cluster is k3s, EKS, or bare kubeadm. The k3s nodes themselves use the kubectl symlink bundled by k3s at <code class="notranslate">/usr/local/bin/kubectl</code> — nothing from <code class="notranslate">pkgs.k8s.io</code> is installed on them.</p>
+<p dir="auto"><code class="notranslate">kubectl</code> is pinned to the cluster minor version (<code class="notranslate">v1.34</code> to match <code class="notranslate">k3s v1.34.6+k3s1</code>). The Kubernetes client/server skew policy supports one minor version in either direction, but pinning avoids subtle incompatibilities and makes the intent explicit. When the cluster is upgraded, the variable gets bumped.</p>
+<p dir="auto"><code class="notranslate">k9s</code> has no apt repo — it's distributed as a binary on GitHub releases. The playbook handles this with an idempotency check: compare the installed version string against the pinned version variable, download and extract only if they don't match. Bumping the version variable and re-running the playbook upgrades it.</p>
+<hr>
+<h2 dir="auto">The Bootstrap Playbook</h2>
+<p dir="auto">The control node is added to the Ansible inventory as a group:</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">control_node</span>:
+  <span class="pl-ent">hosts</span>:
+    <span class="pl-ent">localhost</span>:
+      <span class="pl-ent">ansible_connection</span>: <span class="pl-s">local</span></pre></div>
+<p dir="auto"><code class="notranslate">ansible_connection: local</code> tells Ansible not to SSH — it runs tasks directly on the local machine. The playbook targets this group:</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate">- <span class="pl-ent">name</span>: <span class="pl-s">Bootstrap control node</span>
+  <span class="pl-ent">hosts</span>: <span class="pl-s">control_node</span>
+  <span class="pl-ent">connection</span>: <span class="pl-s">local</span>
+  <span class="pl-ent">become</span>: <span class="pl-c1">true</span>
+  <span class="pl-ent">vars</span>:
+    <span class="pl-ent">kubectl_version</span>: <span class="pl-s"><span class="pl-pds">"</span>v1.34<span class="pl-pds">"</span></span>
+    <span class="pl-ent">k9s_version</span>: <span class="pl-s"><span class="pl-pds">"</span>v0.50.18<span class="pl-pds">"</span></span>
+  <span class="pl-ent">tasks</span>:
+    <span class="pl-s">...</span></pre></div>
+<p dir="auto">The chicken-and-egg problem: you need Ansible to run the playbook, but the playbook installs Ansible. The solution is one manual command documented in the README:</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate">sudo apt install ansible <span class="pl-k">&amp;&amp;</span> sudo ansible-playbook playbooks/control-node.yaml</pre></div>
+<p dir="auto">After that, re-running the playbook is idempotent. The second run shows <code class="notranslate">changed=0</code> for everything except any tools that have been version-bumped.</p>
+<hr>
+<h2 dir="auto">The WSL Consideration</h2>
+<p dir="auto">The control node is Ubuntu 24.04 running as a WSL2 distribution on Windows. WSL is a legitimate and increasingly common environment for DevOps work — it gives a full Linux toolchain on a Windows machine without a dedicated Linux box.</p>
+<p dir="auto">One quirk: <code class="notranslate">become: true</code> with <code class="notranslate">--ask-become-pass</code> doesn't work well when Ansible runs on <code class="notranslate">localhost</code> in WSL. Ansible's sudo prompt handshake depends on PTY behaviour that WSL's terminal layer doesn't reliably support, causing the become authentication to time out.</p>
+<p dir="auto">The fix is straightforward: run the control node playbook with <code class="notranslate">sudo</code> directly, which means Ansible already runs as root and <code class="notranslate">become: true</code> tasks escalate from root to root without any password prompt:</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate">sudo ansible-playbook playbooks/control-node.yaml</pre></div>
+<p dir="auto">This is a local machine — running as root is no different from running with sudo. The servers don't have this issue because they have passwordless sudo configured via cloud-init, so <code class="notranslate">become: true</code> works without prompting.</p>
+<hr>
+<h2 dir="auto">Migrating from Fedora to Ubuntu WSL</h2>
+<p dir="auto">The previous control node was a Fedora workstation. The toolchain — <code class="notranslate">kubectl</code>, <code class="notranslate">helm</code>, k3s cluster access — was set up there over time without documentation. The WSL migration was an opportunity to codify everything.</p>
+<p dir="auto">The only state that needed copying was the kubectl access credentials: the x509 client certificate, private key, and CA certificate in <code class="notranslate">~/.kube/certs/</code>. These are user credentials, not machine credentials — the certificate identifies <code class="notranslate">ls0775</code> with group membership <code class="notranslate">k3s-admins</code>, and it works from any machine with network access to the cluster API.</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate"><span class="pl-c"><span class="pl-c">#</span> Copy certs from Fedora to WSL</span>
+scp ls0775@fedora:<span class="pl-k">~</span>/.kube/certs/ls0775.key  <span class="pl-k">~</span>/.kube/certs/
+scp ls0775@fedora:<span class="pl-k">~</span>/.kube/certs/ls0775.crt  <span class="pl-k">~</span>/.kube/certs/
+scp ls0775@fedora:<span class="pl-k">~</span>/.kube/certs/ca.crt      <span class="pl-k">~</span>/.kube/certs/
+scp ls0775@fedora:<span class="pl-k">~</span>/.kube/config            <span class="pl-k">~</span>/.kube/config
+chmod 600 <span class="pl-k">~</span>/.kube/certs/ls0775.key <span class="pl-k">~</span>/.kube/config</pre></div>
+<p dir="auto">The playbook creates <code class="notranslate">~/.kube/</code> and <code class="notranslate">~/.kube/certs/</code> with <code class="notranslate">mode: 0700</code> before the kubeconfig steps are needed. This is the extent of what Ansible can automate here — the kubeconfig itself involves certificates signed by the k3s CA and is documented as a manual procedure in <code class="notranslate">docs/operations/k3s-access.md</code>.</p>
+<p dir="auto">After copying:</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate">$ kubectl get nodes
+NAME            STATUS   ROLES                  AGE
+k3s-server-01   Ready    control-plane,etcd     23d
+k3s-server-02   Ready    control-plane,etcd     7d
+k3s-server-03   Ready    control-plane,etcd     4d
+k3s-agent-01    Ready    <span class="pl-k">&lt;</span>none<span class="pl-k">&gt;</span>                 22d
+k3s-agent-02    Ready    <span class="pl-k">&lt;</span>none<span class="pl-k">&gt;</span>                 7d
+
+$ kubectl auth whoami
+Username: ls0775
+Groups:   [k3s-admins system:authenticated]</pre></div>
+<p dir="auto">The WSL workstation is now a fully functional control node, with the same cluster access as the Fedora machine — and unlike the Fedora machine, its entire setup is reproducible from one playbook.</p>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<p dir="auto">The instinct when building infrastructure tooling is to focus on the servers. The workstation is where you work, not what you manage — it doesn't feel like infrastructure. That's wrong.</p>
+<p dir="auto">A workstation with an undocumented toolchain is a single point of failure. If it's lost, rebuilt, or replaced (as happened here, moving from Fedora to WSL), you spend time reconstructing it from memory and tribal knowledge instead of running a playbook. Every hour spent on recovery is an hour not spent on the actual work.</p>
+<p dir="auto">The control node playbook also serves as documentation. A new engineer joining the project runs one command and has a working environment. An employer reviewing the repo sees that operational discipline extends to the development environment, not just the production cluster.</p>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">With the control node codified and the servers consistent, the next operational question is what happens when the observability stack itself restarts. Metrics, alerts, and logs are only useful if they survive the churn of real cluster operations. <strong>Next:</strong> <a href="/blog/post-15-observability-survives-restarts/">Post 15 — Making Observability Survive Restarts: Loki S3, Persistent Metrics, and the Fixes That Followed</a> — turning the monitoring stack from "useful right now" into something that keeps history.</p>
+        </article>
+
+    </main>
+</body>
+</html>
