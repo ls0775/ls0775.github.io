@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Making Observability Survive Restarts: Loki S3, Persistent Metrics, and the Fixes That Followed | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Making Observability Survive Restarts: Loki S3, Persistent Metrics, and the Fixes That Followed</h1>
+            <p class="post-date">27 May 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, observability, loki, minio, prometheus, grafana, argocd, kubernetes, sre</p>
+<p dir="auto">In <a href="/blog/post-10-observability-prometheus-grafana/">Post 10</a>, I was explicit about the biggest gap in the monitoring stack: Prometheus could tell me what was happening right now, but it could not tell me what had happened before a restart. That gap stopped being theoretical the moment I started treating the platform like something that should survive upgrades, pod churn, and real operational mistakes.</p>
+<p dir="auto">This post is about closing part of that gap properly. Not by adding another dashboard, but by making the observability stack durable: logs that survive pod restarts, metrics that survive pod restarts, alert history that survives pod restarts — and the unexpected breakages that surfaced as soon as I touched the stack.</p>
+<hr>
+<h2 dir="auto">The Durability Gap Inside "Working" Observability</h2>
+<p dir="auto">The observability stack was already useful:</p>
+<ul dir="auto">
+<li><strong>Prometheus</strong> was scraping the cluster</li>
+<li><strong>Grafana</strong> was visualizing it</li>
+<li><strong>Alertmanager</strong> was routing alerts</li>
+<li><strong>Loki</strong> existed as a direction of travel</li>
+</ul>
+<p dir="auto">But useful is not the same as durable.</p>
+<p dir="auto">At that point:</p>
+<ul dir="auto">
+<li>Prometheus had no persistent volume, so a restart meant losing metrics history</li>
+<li>Alertmanager had no persistent volume, so silences and notification state disappeared on restart</li>
+<li>Loki was still effectively ephemeral, which meant log history vanished with the pod</li>
+</ul>
+<p dir="auto">That is fine for a demo. It is not fine if the point of the platform is learning operational behaviour that looks like production. If a monitoring stack forgets everything every time a pod restarts, it cannot help with post-mortems. It can only help with live staring at graphs.</p>
+<hr>
+<h2 dir="auto">What I Changed</h2>
+<p dir="auto">The fix split into three parts.</p>
+<h3 dir="auto">1. Prometheus got durable storage</h3>
+<p dir="auto">Prometheus now uses a <code class="notranslate">10Gi</code> PVC via <code class="notranslate">local-path</code>:</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">prometheus</span>:
+  <span class="pl-ent">prometheusSpec</span>:
+    <span class="pl-ent">storageSpec</span>:
+      <span class="pl-ent">volumeClaimTemplate</span>:
+        <span class="pl-ent">spec</span>:
+          <span class="pl-ent">storageClassName</span>: <span class="pl-s">local-path</span>
+          <span class="pl-ent">accessModes</span>: <span class="pl-s">["ReadWriteOnce"]</span>
+          <span class="pl-ent">resources</span>:
+            <span class="pl-ent">requests</span>:
+              <span class="pl-ent">storage</span>: <span class="pl-s">10Gi</span></pre></div>
+<p dir="auto">That is not cross-node HA storage. It is a simpler and more immediate improvement: metrics survive pod restarts on the same node, which is a massive step up from "everything disappears if the pod is rescheduled."</p>
+<h3 dir="auto">2. Alertmanager got durable storage</h3>
+<p dir="auto">Alertmanager got the same treatment, with a smaller <code class="notranslate">1Gi</code> PVC. That means silences, deduplication state, and alerting context now survive restarts instead of resetting at the worst possible moment.</p>
+<p dir="auto">This is one of those changes that sounds minor until you imagine debugging a noisy alert storm and losing all silences because the pod restarted mid-incident.</p>
+<h3 dir="auto">3. Loki moved from ephemeral storage to MinIO S3</h3>
+<p dir="auto">This was the bigger change.</p>
+<p dir="auto">Instead of storing data on the pod filesystem, Loki now writes to MinIO over the in-cluster S3 API:</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">loki</span>:
+  <span class="pl-ent">schemaConfig</span>:
+    <span class="pl-ent">configs</span>:
+      - <span class="pl-ent">from</span>: <span class="pl-s"><span class="pl-pds">"</span>2026-05-03<span class="pl-pds">"</span></span>
+        <span class="pl-ent">store</span>: <span class="pl-s">tsdb</span>
+        <span class="pl-ent">object_store</span>: <span class="pl-c1">s3</span>
+  <span class="pl-ent">storage</span>:
+    <span class="pl-ent">type</span>: <span class="pl-c1">s3</span>
+    <span class="pl-ent">bucketNames</span>:
+      <span class="pl-ent">chunks</span>: <span class="pl-s">loki</span>
+      <span class="pl-ent">ruler</span>: <span class="pl-s">loki</span>
+      <span class="pl-ent">admin</span>: <span class="pl-s">loki</span>
+    <span class="pl-ent">s3</span>:
+      <span class="pl-ent">endpoint</span>: <span class="pl-s">http://minio.storage.svc.cluster.local:9000</span></pre></div>
+<p dir="auto">Credentials come from a Kubernetes Secret via environment variables rather than being committed to the repo. The result is that log history survives Loki pod restarts, and MinIO becomes the durable backing store for the logging layer.</p>
+<p dir="auto">That matters because logs are often only interesting <em>after</em> something has already broken.</p>
+<hr>
+<h2 dir="auto">The Part That Wasn't Obvious</h2>
+<p dir="auto">The Loki migration was not a one-shot config change. It took three iterations to make it actually work.</p>
+<h3 dir="auto">Loki still needed local scratch space</h3>
+<p dir="auto">My first instinct was: if the backend is S3, local storage should be unnecessary. That turned out to be wrong. Loki still needs writable local space for its WAL and temporary files, so <code class="notranslate">emptyDir</code> had to stay mounted at <code class="notranslate">/var/loki</code> even after the durable storage moved to MinIO.</p>
+<p dir="auto">That is a useful distinction:</p>
+<ul dir="auto">
+<li><strong>Durable data path:</strong> MinIO S3</li>
+<li><strong>Ephemeral working space:</strong> <code class="notranslate">emptyDir</code> at <code class="notranslate">/var/loki</code></li>
+</ul>
+<p dir="auto">If you remove the second one, the first one does not save you.</p>
+<h3 dir="auto">Loki would not expand environment variables by default</h3>
+<p dir="auto">The access key and secret key were injected through <code class="notranslate">secretKeyRef</code>, but Loki does not automatically substitute <code class="notranslate">${ENV_VAR}</code> placeholders in the config. The fix was adding:</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">singleBinary</span>:
+  <span class="pl-ent">extraArgs</span>:
+    - <span class="pl-s">-config.expand-env=true</span></pre></div>
+<p dir="auto">Without that, the config looked right in Git and was wrong at runtime.</p>
+<h3 dir="auto">An old schema entry kept sending data to the wrong place</h3>
+<p dir="auto">The legacy filesystem schema entry from <code class="notranslate">2024-04-01</code> was still present. That meant current-time data was still being routed toward the old filesystem store instead of the new S3 backend. The fix was to remove the old entry and leave a single S3-backed schema from <code class="notranslate">2026-05-03</code>.</p>
+<p dir="auto">This is the kind of bug that is easy to miss because the configuration is syntactically valid. It is just not doing what you think.</p>
+<hr>
+<h2 dir="auto">What Broke While I Was Fixing It</h2>
+<p dir="auto">This is the part I like documenting most, because it is the most realistic.</p>
+<p dir="auto">Changing one part of a platform often surfaces assumptions somewhere else. In this case, making the observability stack more durable exposed two unrelated stability issues.</p>
+<h3 dir="auto">Grafana crashed on startup after the chart upgrade</h3>
+<p dir="auto">As part of the monitoring work, <code class="notranslate">kube-prometheus-stack</code> moved from <code class="notranslate">84.1.2</code> to <code class="notranslate">84.5.0</code>. After the upgrade, Grafana's <code class="notranslate">init-chown-data</code> init container started failing with <code class="notranslate">Permission denied</code> against existing PVC directories like <code class="notranslate">png</code>, <code class="notranslate">pdf</code>, and <code class="notranslate">csv</code>.</p>
+<p dir="auto">The PVC contents already had the correct ownership. The init container was trying to "fix" a problem that did not actually exist, and in doing so, it created a real one. The resolution was:</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">grafana</span>:
+  <span class="pl-ent">initChownData</span>:
+    <span class="pl-ent">enabled</span>: <span class="pl-c1">false</span></pre></div>
+<p dir="auto">That is a good reminder that chart defaults are not universally safe once a workload has real, existing state.</p>
+<h3 dir="auto">Argo CD repo-server had been unhealthy for days</h3>
+<p dir="auto">This one was pre-existing, which made it even more interesting. The Argo CD repo-server had been stuck in repeated restarts because its liveness probe was too strict:</p>
+<ul dir="auto">
+<li>the liveness path was <code class="notranslate">/healthz?full=true</code></li>
+<li>the full check included Git connectivity</li>
+<li>the timeout was <code class="notranslate">1</code> second</li>
+</ul>
+<p dir="auto">That was not enough. The process was healthy, but the probe budget was unrealistic. The fix was simply to give the probes enough time:</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">repoServer</span>:
+  <span class="pl-ent">livenessProbe</span>:
+    <span class="pl-ent">timeoutSeconds</span>: <span class="pl-c1">10</span>
+  <span class="pl-ent">readinessProbe</span>:
+    <span class="pl-ent">timeoutSeconds</span>: <span class="pl-c1">10</span></pre></div>
+<p dir="auto">The handoff notes recorded <strong>1807 restarts over 3 days</strong> before this was corrected. That is exactly the kind of problem observability work is supposed to reveal: not just new features, but broken assumptions already sitting in the platform.</p>
+<hr>
+<h2 dir="auto">The Real Decision: Durability First, Availability Later</h2>
+<p dir="auto">The most important architectural point in this change is that I did <strong>not</strong> solve every reliability problem at once.</p>
+<p dir="auto">Prometheus and Alertmanager now persist to <code class="notranslate">local-path</code>. Loki persists to MinIO. That means the stack is much better at surviving pod restarts and routine churn. It does <strong>not</strong> yet mean the entire observability stack cleanly survives loss of a workload node.</p>
+<p dir="auto">That distinction matters.</p>
+<p dir="auto">This work was about <strong>durability</strong>:</p>
+<ul dir="auto">
+<li>keeping logs after Loki restarts</li>
+<li>keeping metrics after Prometheus restarts</li>
+<li>keeping alert state after Alertmanager restarts</li>
+</ul>
+<p dir="auto">The next layer is <strong>availability under host loss</strong>, which is a different problem entirely. Shared storage, replica placement, workload spread, and node-failure behaviour belong to that conversation. In this repository, that work is now tracked separately instead of being hand-waved together with "persistent storage."</p>
+<p dir="auto">This was the right trade-off. Solving one reliability dimension cleanly is better than pretending to solve three at once with vague language.</p>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<p dir="auto">The first lesson is that <strong>persistence and availability are not synonyms</strong>. A PVC is not high availability. S3-backed logs are not automatic failover. Durable state is one layer of reliability, and it is still worth doing even when the broader HA story is unfinished.</p>
+<p dir="auto">The second lesson is that operational improvements often arrive as a bundle: the intended change, the side effects of that change, and the unrelated problems you finally notice because you were looking closely. That is normal platform work. You touch logging storage and end up fixing Grafana startup behaviour and an Argo CD probe budget that had been wrong for days.</p>
+<p dir="auto">That is also why this kind of work is worth writing about. The interesting part is not "I added a PVC." The interesting part is learning how systems actually behave once they have state, upgrades, and history.</p>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">The observability stack now remembers more of what happened, which makes it much more useful in the real world. The next reliability question is broader: not "does this survive a pod restart?" but "what happens when an entire workload host disappears?" That host-loss survivability work is the next platform gap to close.</p>
+        </article>
+
+    </main>
+</body>
+</html>
