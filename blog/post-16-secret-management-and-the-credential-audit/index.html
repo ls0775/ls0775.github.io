@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Where Are Your Passwords? A Credential Audit and the Secret Management Gap | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Where Are Your Passwords? A Credential Audit and the Secret Management Gap</h1>
+            <p class="post-date">30 May 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, security, kubernetes, azure, secrets, etcd, sre, devops</p>
+<p dir="auto">Every platform has a credentials problem hiding somewhere. Mine was hiding in plain sight: there was no vault, no external secret store, and one service had its admin password committed directly to a Git repository in plaintext. This post is about finding all of that, deciding what to do about it, hitting a wall trying to do it, and understanding why the situation was less catastrophic than it first appeared.</p>
+<hr>
+<h2 dir="auto">The Question That Started It</h2>
+<p dir="auto">The prompt was simple: "I do not seem to have any vault or similar service to store usernames and passwords. On any outage to the service the changed password is lost."</p>
+<p dir="auto">That is a good instinct. If you change a password inside an application, and the cluster dies before the change is backed up, what happens? The answer depends entirely on how your secrets are managed — and in my case, the answer was "we'll figure it out when it happens," which is not a posture I wanted to keep.</p>
+<p dir="auto">So I did a full credential audit.</p>
+<hr>
+<h2 dir="auto">What the Audit Found</h2>
+<p dir="auto">Kubernetes Secrets live in etcd. They are not stored in Git, they are not in a vault, and they are not in any external system. They exist only inside the cluster. The four secrets that were applied manually with no external record:</p>
+<markdown-accessiblity-table><table role="table">
+<thead>
+<tr>
+<th>Secret</th>
+<th>Namespace</th>
+<th>Risk</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code class="notranslate">minio-root-credentials</code></td>
+<td>storage</td>
+<td>Lost on rebuild</td>
+</tr>
+<tr>
+<td><code class="notranslate">loki-minio-credentials</code></td>
+<td>monitoring</td>
+<td>Lost on rebuild</td>
+</tr>
+<tr>
+<td><code class="notranslate">cloudflare-api-token</code></td>
+<td>cert-manager</td>
+<td>Lost on rebuild</td>
+</tr>
+<tr>
+<td><code class="notranslate">tofu-state-user-credentials</code></td>
+<td>storage</td>
+<td>Lost on rebuild — and re-opens the IaC state risk</td>
+</tr>
+</tbody>
+</table></markdown-accessiblity-table>
+<p dir="auto">That last one mattered more than it appeared. The whole point of migrating OpenTofu state to MinIO (<a href="/blog/post-12-whats-next-loki-minio-and-beyond/">Post 12</a>) was to have a recoverable remote backend. But <code class="notranslate">tofu-state-user-credentials</code> is the key that unlocks that backend. If it disappears because the cluster is rebuilt, OpenTofu cannot reach its own state file — and the R-002 mitigation I spent an entire session on starts unravelling.</p>
+<p dir="auto">Then there was the one I was not expecting.</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">grafana</span>:
+  <span class="pl-ent">adminPassword</span>: <span class="pl-s">admin</span></pre></div>
+<p dir="auto">That line was committed to <code class="notranslate">k8s/apps/monitoring/kube-prometheus-stack-values.yaml</code>. A plaintext password — weak, default, and in version control. Two problems at once: the value was wrong, and the location was wrong.</p>
+<hr>
+<h2 dir="auto">Deciding What to Do About It</h2>
+<p dir="auto">Three options emerged, each with a different trade-off.</p>
+<h3 dir="auto">Option A: SOPS + Age</h3>
+<p dir="auto">Encrypt secret manifests and commit the ciphertext to Git. An Age private key decrypts them. Cluster rebuild means: apply the key, re-apply the manifests, done.</p>
+<p dir="auto">The problem is that the Age key is now the single point of failure. You have moved the bootstrap problem, not eliminated it. You also need to update a Git file every time you rotate a secret, which makes rotation slightly more friction-filled than it should be.</p>
+<h3 dir="auto">Option B: Sealed Secrets</h3>
+<p dir="auto">Bitnami Sealed Secrets encrypts secrets with the cluster's own key and commits <code class="notranslate">SealedSecret</code> CRDs to Git. The controller decrypts them at runtime.</p>
+<p dir="auto">Same problem as SOPS: if the cluster is destroyed, the controller key needs to be backed up separately. It also does not give you an external source of truth — you have a cluster-internal key managing cluster-internal secrets, and the key needs its own backup strategy.</p>
+<h3 dir="auto">Option C: Azure Key Vault + External Secrets Operator</h3>
+<p dir="auto">Store secrets in Azure Key Vault. The External Secrets Operator (ESO) runs in the cluster, authenticates to Key Vault with a Service Principal, and materialises standard Kubernetes Secrets from Key Vault values on a refresh schedule.</p>
+<p dir="auto">The clear advantage: the secrets actually live somewhere external. Cluster rebuild means: apply the one bootstrap SP credential, re-apply the ESO manifests, and ESO fetches everything else automatically from Azure. Rotation happens in the Key Vault UI and propagates to the cluster on the next sync cycle without touching Git at all.</p>
+<p dir="auto">For the learning goals of this project — building habits that transfer to enterprise Kubernetes environments — Azure Key Vault + ESO is also the closest approximation of how production platforms actually handle this problem. It made sense as the right direction.</p>
+<p dir="auto">That is the decision I recorded in ADR-019.</p>
+<hr>
+<h2 dir="auto">The Part That Did Not Work</h2>
+<p dir="auto">I had <code class="notranslate">az login</code> working, the resource group existed, and I created the Key Vault:</p>
+<div class="highlight highlight-source-shell" dir="auto"><pre class="notranslate">az keyvault create \
+  --name kv-homelab-ls0775 \
+  --resource-group rg-homelab \
+  --location australiaeast \
+  --enable-rbac-authorization <span class="pl-c1">true</span></pre></div>
+<p dir="auto">Then it stalled in two places. Creating a Service Principal requires Azure AD app registration permissions, and my Visual Studio Enterprise subscription account does not have them. Writing secrets to the Key Vault after creating it also failed — creating the vault with RBAC mode enabled means you need a role assignment before you can write to it, and assigning roles requires the same Graph API permissions I did not have.</p>
+<pre class="notranslate"><code class="notranslate">ERROR: Insufficient privileges to complete the operation.
+</code></pre>
+<p dir="auto">This is a known constraint with personal Microsoft Account subscriptions. The fix is to request those permissions from an Azure AD admin, or to create the Service Principal through the Azure Portal directly. In my case, this work is deferred until that is sorted. The Key Vault exists and is empty. The ESO manifests are in Git and ready to apply. The gap is a permissions problem, not an architecture problem.</p>
+<hr>
+<h2 dir="auto">Wait — Do I Actually Have a Recovery Path Already?</h2>
+<p dir="auto">Before writing off the situation entirely, I asked an important question: I run 6-hourly etcd backups. Does that change things?</p>
+<p dir="auto">Yes, it does.</p>
+<p dir="auto">Kubernetes Secrets are stored in etcd. Every etcd snapshot includes them. On a full cluster rebuild with a successful restore from snapshot, all four of those manually applied secrets come back exactly as they were. The maximum data loss window is 6 hours — the interval between backups.</p>
+<p dir="auto">That changed the risk assessment significantly. The original concern was "secrets lost with no recovery path." With 6-hourly backups, the correct description is "secrets recoverable from the most recent snapshot, with up to 6 hours of potential loss." That is not the same thing as no recovery path.</p>
+<p dir="auto">The residual risk is a different question: where do the backups live?</p>
+<p dir="auto">In my case, the etcd snapshots go to Synology NFS — which is on-site. R-003, the open risk for on-site-only backups, now overlaps with R-012. A house-level event (fire, power surge) could take out both the cluster and the backups together. That connection was worth making explicit in the risk register, because the two risks reinforce each other in a way that was not previously documented.</p>
+<h3 dir="auto">The Distinction That Matters</h3>
+<p dir="auto">This session reinforced something I keep returning to in this series: <strong>durability and availability are not the same as recoverability from total loss</strong>.</p>
+<p dir="auto">The observability stack changes in Post 15 made monitoring durable — able to survive pod restarts. The etcd backups make the cluster's secret state recoverable — restorable after full loss. Neither of those is the same as having an external source of truth that exists independently of the cluster. etcd backups are a recovery mechanism. A vault is a source of truth. Both are useful. They are not substitutes for each other.</p>
+<hr>
+<h2 dir="auto">The Immediate Fix</h2>
+<p dir="auto">While the vault work is deferred, the plaintext password was fixable immediately and independently.</p>
+<p dir="auto">The <code class="notranslate">kube-prometheus-stack</code> Helm chart supports referencing an existing Kubernetes Secret instead of accepting a password in the values file:</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">grafana</span>:
+  <span class="pl-ent">admin</span>:
+    <span class="pl-ent">existingSecret</span>: <span class="pl-s">grafana-admin-credentials</span>
+    <span class="pl-ent">userKey</span>: <span class="pl-s">admin-user</span>
+    <span class="pl-ent">passwordKey</span>: <span class="pl-s">admin-password</span></pre></div>
+<p dir="auto">I created <code class="notranslate">grafana-admin-credentials</code> in the <code class="notranslate">monitoring</code> namespace with a strong generated password, removed the plaintext line from the values file, and upgraded the Helm release. Grafana rolled out with the new configuration and the old plaintext value is gone from the repository.</p>
+<p dir="auto">This is the minimum bar: no credentials in Git, even weak defaults. The secret is still only in etcd — which is covered by the 6-hourly backup — but it is not in version control.</p>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<p dir="auto">The most useful thing this session produced was not the Key Vault or the ESO manifests (neither of which is running yet). It was the audit itself.</p>
+<p dir="auto">I did not know exactly which secrets were manually applied and had no external record until I listed them out, looked at what was in the cluster, and thought through what happens on a rebuild. That exercise produced a clear picture of the risk surface in about ten minutes. Every platform should do this periodically. The secrets problem is never as bad as you fear or as safe as you assume — but you do not know which until you look.</p>
+<p dir="auto">The second lesson is about permissions. Azure Key Vault is the right architecture. The implementation is blocked by a permissions constraint that has nothing to do with the architecture. That is a real production pattern: the right answer is sometimes available only after clearing access-control gates that sit outside the technical domain. The correct response is to do the architecture work, document the decision, and wait for the gate to open — not to compromise on the approach because the gate is annoying.</p>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">The Key Vault sits empty in <code class="notranslate">australiaeast</code>, ready to be populated when Azure AD permissions are in order. The ESO Helm chart values and ClusterSecretStore are committed to Git. The deployment itself is a Helm install and three <code class="notranslate">kubectl apply</code> commands once the Service Principal exists.</p>
+<p dir="auto">In the meantime, the bigger open risk is R-003: the etcd backups that provide the current recovery path live entirely on-site. That gap connects to both secret durability and general disaster recovery. The next meaningful improvement to platform resilience is getting those backups off-site.</p>
+        </article>
+
+    </main>
+</body>
+</html>
