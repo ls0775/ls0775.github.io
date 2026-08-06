@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Platform Maintenance: Automated OS Patching, Manual ACME DNS-01 Challenges, and Wildcard TLS Recovery | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Platform Maintenance: Automated OS Patching, Manual ACME DNS-01 Challenges, and Wildcard TLS Recovery</h1>
+            <p class="post-date">4 August 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, kubernetes, maintenance, ansible, os-patching, acme, tls, cert-manager, sre, devops</p>
+<p dir="auto">As a platform matures, maintenance becomes an inevitable reality. The passage of time brings kernel updates, security vulnerabilities, and credential expirations that demand structured operational procedures. In this post, I cover two critical maintenance events: executing live, automated OS patching across all 5 k3s nodes via Ansible, and recovering from an expired Cloudflare API token through out-of-band ACME DNS-01 wildcard TLS certificate issuance.</p>
+<hr>
+<h2 dir="auto">The Setup</h2>
+<p dir="auto">Infrastructure is not static. After running continuously for months, two separate maintenance requirements collided:</p>
+<ol dir="auto">
+<li><strong>OS Vulnerabilities and Kernel Updates:</strong> Both the Proxmox hypervisor layer and the underlying Ubuntu Linux OS on all 5 k3s nodes (<code class="notranslate">k3s-server-01</code>, <code class="notranslate">02</code>, <code class="notranslate">03</code> and <code class="notranslate">k3s-agent-01</code>, <code class="notranslate">02</code>) needed kernel updates (<code class="notranslate">6.8.0-136-generic</code> and <code class="notranslate">7.0.0-28-generic</code>) and security patches (<code class="notranslate">apt update &amp;&amp; apt upgrade -y</code>).</li>
+<li><strong>Expired TLS Certificate:</strong> HTTPS endpoints (<code class="notranslate">*.lab.ls0775.com</code>) began showing SSL expiry warnings because cert-manager's automatic renewal stalled due to an expired Cloudflare API token.</li>
+</ol>
+<hr>
+<h2 dir="auto">What I Built</h2>
+<h3 dir="auto">Part 1: Automated OS Patching &amp; Playbook Hardening</h3>
+<p dir="auto">To patch the node operating systems without risking cluster downtime:</p>
+<ol dir="auto">
+<li><strong>Ansible OS Patching Playbook Execution:</strong> Ran <code class="notranslate">config/playbooks/os-patching-k3s.yaml</code> to perform serial cordoning, package upgrading, rebooting, and node uncordoning one node at a time.</li>
+<li><strong>Playbook Retry Hardening:</strong> During execution, API server reconnect pauses caused transient connection failures while waiting for nodes to return to <code class="notranslate">Ready</code> status. I updated the playbook's <code class="notranslate">kubectl wait</code> task with retry logic (<code class="notranslate">retries: 30</code>, <code class="notranslate">delay: 10</code>):</li>
+</ol>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate">- <span class="pl-ent">name</span>: <span class="pl-s">Wait for node to be Ready again</span>
+  <span class="pl-ent">command</span>: <span class="pl-s">&gt;</span>
+<span class="pl-s">    kubectl wait --for=condition=Ready node/{{ inventory_hostname }} --timeout=300s</span>
+<span class="pl-s"></span>  <span class="pl-ent">register</span>: <span class="pl-s">wait_result</span>
+  <span class="pl-ent">until</span>: <span class="pl-s">wait_result.rc == 0</span>
+  <span class="pl-ent">retries</span>: <span class="pl-c1">30</span>
+  <span class="pl-ent">delay</span>: <span class="pl-c1">10</span></pre></div>
+<ol start="3" dir="auto">
+<li><strong>Hypervisor &amp; Cluster Verification:</strong> All 5 k3s nodes and Proxmox compute hosts were successfully patched, rebooted, and verified <code class="notranslate">Ready</code>.</li>
+</ol>
+<h3 dir="auto">Part 2: Out-of-Band ACME DNS-01 Challenge &amp; Wildcard TLS Issuance</h3>
+<ol dir="auto">
+<li><strong>Root Cause Identified:</strong> Discovered that the Cloudflare API Token (<code class="notranslate">cfut_1ARK...</code>) stored in Key Vault had expired on Cloudflare's servers. Cert-manager's pre-flight zone lookup failed, causing cert-manager to re-queue orders indefinitely without reaching Let's Encrypt.</li>
+<li><strong>Direct ACME Client Execution:</strong> Using the cluster ACME account key (<code class="notranslate">letsencrypt-prod-account-key</code>), I initialized a direct ACME Order against Let's Encrypt production endpoints.</li>
+<li><strong>DNS TXT Record Challenge:</strong> Extracted SHA-256 challenge hashes (<code class="notranslate">bzD4z0Q...</code> &amp; <code class="notranslate">hlBQ7_CV...</code>) and published <code class="notranslate">_acme-challenge</code> TXT records to Cloudflare DNS.</li>
+<li><strong>Certificate Issuance &amp; Distribution:</strong> Let's Encrypt validated the records and issued a fresh 90-day wildcard certificate (<code class="notranslate">*.lab.ls0775.com</code> / <code class="notranslate">lab.ls0775.com</code>, valid <strong>Aug 4, 2026 – Nov 2, 2026</strong>). I updated the <code class="notranslate">lab-wildcard-tls</code> secret across all active namespaces (<code class="notranslate">cert-manager</code>, <code class="notranslate">argocd</code>, <code class="notranslate">default</code>, <code class="notranslate">headlamp</code>, <code class="notranslate">homepage</code>, <code class="notranslate">monitoring</code>, <code class="notranslate">storage</code>, and <code class="notranslate">cattle-system</code>).</li>
+<li><strong>Ingress Reload:</strong> Restarted Traefik in <code class="notranslate">kube-system</code>, restoring <code class="notranslate">HTTP/2 200</code> HTTPS connectivity across all lab web applications.</li>
+</ol>
+<hr>
+<h2 dir="auto">The Decision</h2>
+<p dir="auto">When maintenance needs arise, automation must be balanced with operational agility:</p>
+<ul dir="auto">
+<li><strong>For OS Patching:</strong> Use <strong>Ansible automation with serial node draining</strong> to ensure that patching a 5-node cluster requires zero manual SSH commands while preserving etcd quorum.</li>
+<li><strong>For Credential Expiration Outages:</strong> Execute <strong>out-of-band ACME challenges</strong> directly against the CA to restore platform UIs immediately, rather than waiting for multi-layer credential pipeline reconciliation.</li>
+</ul>
+<hr>
+<h2 dir="auto">What Went Wrong</h2>
+<ul dir="auto">
+<li><strong>Transient API Reconnect Pauses:</strong> When control plane nodes reboot during OS patching, local <code class="notranslate">kubectl</code> connections momentarily drop. Adding retry loops to Ansible tasks prevents the playbook from failing prematurely during standard node reboots.</li>
+<li><strong>Multi-Namespace Secret Sync:</strong> Wildcard TLS certificates must be distributed to every namespace using ingress resources. Some services (e.g. Rancher) require explicit secret key mappings (<code class="notranslate">tls-rancher-ingress</code>) to pick up renewed certificates cleanly.</li>
+</ul>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<ul dir="auto">
+<li><strong>Maintenance is a Routine SRE Discipline:</strong> Regular OS patching and certificate lifecycle management are just as vital to platform health as shipping new workloads.</li>
+<li><strong>Automated Playbooks Require Resilience:</strong> Infrastructure automation must account for transient network disconnects during node reboots.</li>
+</ul>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">In the next post, I document serial Proxmox host maintenance drains, hardware compute node repurposing to NUC 7 i7 hosts, and asymmetric 24GB DDR4 memory upgrades using Intel Flex Memory.</p>
+        </article>
+
+    </main>
+</body>
+</html>

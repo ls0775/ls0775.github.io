@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Visualizing the Platform: Deploying Rancher UI with Multi-Host High Availability | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Visualizing the Platform: Deploying Rancher UI with Multi-Host High Availability</h1>
+            <p class="post-date">11 June 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, kubernetes, rancher, high-availability, helm, ingress, sre, devops</p>
+<p dir="auto">When your Kubernetes cluster reaches a certain size, command-line inspection via <code class="notranslate">kubectl</code> and <code class="notranslate">k9s</code> remains indispensable, but visual platform management adds immense value — especially for multi-cluster oversight and rapid workload troubleshooting. In this post, I detail why and how I deployed Rancher Server to the k3s cluster, adhering strictly to our host-loss survivability standard (R-011) with a 2-replica high-availability configuration across physical hypervisors.</p>
+<hr>
+<h2 dir="auto">The Setup</h2>
+<p dir="auto">Following our deployment of Headlamp (<a href="/blog/post-14-control-node-as-infrastructure/">Post 14</a>) for lightweight, developer-focused cluster inspection, the platform lacked an enterprise-grade control plane manager capable of multi-cluster management, cluster lifecycle tracking, and RBAC governance.</p>
+<p dir="auto">While Headlamp serves as a fantastic lightweight UI, Rancher provides a full-featured management engine — managing workloads, namespaces, secrets, and underlying nodes under a single interface. However, running an enterprise manager like Rancher on a 2-node Proxmox HA cluster requires careful design so that taking down a single host does not bring down your management UI.</p>
+<hr>
+<h2 dir="auto">What I Built</h2>
+<p dir="auto">I installed Rancher Server into a dedicated <code class="notranslate">cattle-system</code> namespace using the <code class="notranslate">rancher-stable</code> Helm chart repository.</p>
+<p dir="auto">Key details of the deployment:</p>
+<ol dir="auto">
+<li><strong>Namespace Provisioning:</strong> Created <code class="notranslate">cattle-system</code> as the target namespace.</li>
+<li><strong>Helm Configuration:</strong> Configured Rancher with <code class="notranslate">replicas: 2</code> and explicit topology spread constraints (<code class="notranslate">topology.kubernetes.io/zone</code>) to ensure the two pods land across separate Proxmox hosts (<code class="notranslate">pve01</code> and <code class="notranslate">pve02</code>).</li>
+<li><strong>Ingress &amp; TLS Binding:</strong> Mapped the existing wildcard TLS certificate secret <code class="notranslate">lab-wildcard-tls</code> into <code class="notranslate">cattle-system</code> as <code class="notranslate">tls-rancher-ingress</code> to serve secure traffic at <code class="notranslate">https://rancher.lab.ls0775.com</code>.</li>
+<li><strong>Dashboard Integration:</strong> Added a Rancher service tile to the Homepage observability section so it sits right alongside Grafana, Headlamp, and Argo CD.</li>
+</ol>
+<hr>
+<h2 dir="auto">The Decision</h2>
+<p dir="auto">The core architectural choice is documented in <a href="../adr/020-rancher-cluster-management.md">ADR-020: Rancher Cluster Management UI</a>.</p>
+<p dir="auto">Rather than running Rancher as a single replica (which would violate our R-011 Workload Availability Standard), I selected a <strong>2-replica Stateful deployment with anti-affinity</strong>:</p>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">replicas</span>: <span class="pl-c1">2</span>
+<span class="pl-ent">topologySpreadConstraints</span>:
+  - <span class="pl-ent">maxSkew</span>: <span class="pl-c1">1</span>
+    <span class="pl-ent">topologyKey</span>: <span class="pl-s">topology.kubernetes.io/zone</span>
+    <span class="pl-ent">whenUnsatisfiable</span>: <span class="pl-s">DoNotSchedule</span>
+    <span class="pl-ent">labelSelector</span>:
+      <span class="pl-ent">matchLabels</span>:
+        <span class="pl-ent">app</span>: <span class="pl-s">rancher</span></pre></div>
+<p dir="auto">Because <code class="notranslate">pve01</code> and <code class="notranslate">pve02</code> are labeled as distinct failure domain zones, Kubernetes forces the two Rancher pods onto separate physical hypervisors. If <code class="notranslate">pve01</code> undergoes physical maintenance or fails, <code class="notranslate">pve02</code> maintains full access to the Rancher interface without interruption.</p>
+<hr>
+<h2 dir="auto">What Went Wrong</h2>
+<p dir="auto">During the initial deployment, Rancher stuck in a pending state with TLS handshake errors.</p>
+<p dir="auto">The root cause was two-fold:</p>
+<ol dir="auto">
+<li><strong>Cert-Manager Hook Mismatch:</strong> Rancher by default attempts to issue its own internal TLS certificates via cert-manager if <code class="notranslate">ingress.tls.source</code> is omitted. Because we rely on a pre-issued wildcard cert (<code class="notranslate">lab-wildcard-tls</code>), Rancher's internal issuer conflicted with the existing ingress settings. Specifying <code class="notranslate">ingress.tls.source=secret</code> resolved the hook loop.</li>
+<li><strong>Local DNS Override Needed:</strong> Once deployed, accessing <code class="notranslate">rancher.lab.ls0775.com</code> timed out externally until a local DNS override pointing to the MetalLB LoadBalancer VIP (<code class="notranslate">192.168.99.100</code>) was configured in the UniFi gateway.</li>
+</ol>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<ul dir="auto">
+<li><strong>Management UIs Should Follow the Same HA Standards as Applications:</strong> It is easy to treat administrative UIs as "secondary tools" and deploy them as single-replica workloads. However, when an outage occurs, your management UI is the exact tool you need to diagnose the failure — meaning it must be as resilient as your production workloads.</li>
+<li><strong>Failover Domains Must Be Explicit:</strong> Declaring <code class="notranslate">topology.kubernetes.io/zone</code> on hypervisor nodes allows Kubernetes schedulers to make host-aware decisions without needing expensive cloud APIs.</li>
+</ul>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">In the next post, I cover a critical incident response session: diagnosing an expired Cloudflare API token, executing manual ACME DNS-01 verification directly against Let's Encrypt, and distributing renewed wildcard TLS certificates across all cluster namespaces.</p>
+        </article>
+
+    </main>
+</body>
+</html>

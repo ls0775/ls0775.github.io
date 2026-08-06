@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Zero-Downtime Maintenance: Serial Proxmox Drains and Asymmetric RAM Upgrades | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Zero-Downtime Maintenance: Serial Proxmox Drains and Asymmetric RAM Upgrades</h1>
+            <p class="post-date">5 August 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, proxmox, kubernetes, hardware, maintenance, memory, sre, devops</p>
+<p dir="auto">Hardware upgrades on bare-metal infrastructure usually mean scheduled downtime. But when your platform is designed with failure-domain awareness and multi-node HA, physical host maintenance becomes a routine operational task. In this post, I detail how I performed serial maintenance shutdowns of both Proxmox hypervisors (<code class="notranslate">pve02</code> and <code class="notranslate">pve01</code>), upgraded system memory using asymmetric SODIMM modules, performed a full NVMe disk audit, and restored cluster state — all while keeping our SSoT documentation fully synchronized.</p>
+<hr>
+<h2 dir="auto">The Setup</h2>
+<p dir="auto">Our Proxmox HA cluster consists of two main compute nodes (<code class="notranslate">pve01</code> and <code class="notranslate">pve02</code>) and a third Synology-backed QDevice (<code class="notranslate">pve03</code>). The k3s Kubernetes cluster spans these hypervisors with 3 control plane nodes and 2 worker nodes.</p>
+<p dir="auto">The goal for this session was twofold:</p>
+<ol dir="auto">
+<li>Repurpose hardware compute nodes to Intel NUC 7 i7 hosts (<code class="notranslate">NUC7i7BNH</code> with Core i7-7567U CPUs).</li>
+<li>Upgrade memory to <strong>24GB DDR4 RAM</strong> per node using asymmetric SO-DIMM configurations (1x 16GB + 1x 8GB).</li>
+</ol>
+<hr>
+<h2 dir="auto">What I Built</h2>
+<p dir="auto">Following our standard procedure <a href="../operations/procedures/proxmox-single-host-maintenance-shutdown.md"><code class="notranslate">docs/operations/procedures/proxmox-single-host-maintenance-shutdown.md</code></a>:</p>
+<ol dir="auto">
+<li><strong>Serial Host Drain 1 (<code class="notranslate">pve02</code>):</strong>
+<ul dir="auto">
+<li>Cordoned worker node <code class="notranslate">k3s-agent-02</code> and control plane node <code class="notranslate">k3s-server-02</code>.</li>
+<li>Evicted running workloads onto <code class="notranslate">pve01</code>.</li>
+<li>Gracefully shut down VMs <code class="notranslate">304</code> and <code class="notranslate">305</code>.</li>
+<li>Executed <code class="notranslate">systemctl poweroff</code> on <code class="notranslate">pve02</code>.</li>
+<li>Verified that <code class="notranslate">pvecluster01</code> maintained quorum (<code class="notranslate">2/3</code> votes via <code class="notranslate">pve01</code> + <code class="notranslate">QDevice</code>).</li>
+</ul>
+</li>
+<li><strong>Host Recovery &amp; Uncordon:</strong> Powered <code class="notranslate">pve02</code> back on, verified VM restart, uncordoned <code class="notranslate">k3s-server-02</code> and <code class="notranslate">k3s-agent-02</code>, and confirmed <code class="notranslate">Ready</code> node status.</li>
+<li><strong>Serial Host Drain 2 (<code class="notranslate">pve01</code> &amp; RAM Upgrade):</strong>
+<ul dir="auto">
+<li>Cordoned worker node <code class="notranslate">k3s-agent-01</code> and control plane node <code class="notranslate">k3s-server-01</code>.</li>
+<li>Drained workloads onto <code class="notranslate">pve02</code>.</li>
+<li>Shut down VMs <code class="notranslate">301</code> and <code class="notranslate">302</code>, then powered off <code class="notranslate">pve01</code>.</li>
+<li>Installed the upgraded memory module.</li>
+<li>Powered <code class="notranslate">pve01</code> back on and verified <code class="notranslate">free -h</code> returning <strong>23Gi</strong> recognized system RAM.</li>
+</ul>
+</li>
+<li><strong>Live Block Device Scan:</strong> Executed live <code class="notranslate">lsblk</code> audits across both hypervisors:
+<ul dir="auto">
+<li><code class="notranslate">pve01</code>: Kingston <code class="notranslate">SNV2S500G</code> 465.8GB NVMe SSD</li>
+<li><code class="notranslate">pve02</code>: Samsung <code class="notranslate">960 PRO</code> 476.9GB NVMe SSD</li>
+</ul>
+</li>
+<li><strong>SSoT Documentation Synchronization (ADR-014):</strong> Updated canonical specs in <a href="../environment-data.md"><code class="notranslate">docs/environment-data.md</code></a> and logged the operational record in <a href="../operations/handoff-log.md"><code class="notranslate">docs/operations/handoff-log.md</code></a>.</li>
+</ol>
+<hr>
+<h2 dir="auto">The Decision</h2>
+<h3 dir="auto">Asymmetric RAM (Intel Flex Memory Technology)</h3>
+<p dir="auto">When upgrading RAM from 16GB to 24GB using one 16GB SODIMM and one 8GB SODIMM, a common question arises: <em>Will asymmetric memory work reliably on an Intel NUC?</em></p>
+<p dir="auto">The answer is <strong>yes</strong>, thanks to <strong>Intel Flex Memory Technology</strong>:</p>
+<ul dir="auto">
+<li>The first <strong>16GB</strong> (8GB from the 16GB module + 8GB from the 8GB module) operates in <strong>Dual-Channel Mode</strong> for maximum memory bandwidth.</li>
+<li>The remaining <strong>8GB</strong> on the 16GB module operates in <strong>Single-Channel Mode</strong>.</li>
+</ul>
+<p dir="auto">This provides the optimal balance of cost, performance, and capacity without needing matched 16GB pairs.</p>
+<hr>
+<h2 dir="auto">What Went Wrong</h2>
+<p dir="auto">During the drain of <code class="notranslate">k3s-agent-01</code>, <code class="notranslate">kubectl drain</code> hit a 10-minute timeout waiting for background controller pods (such as <code class="notranslate">argocd-server</code> and <code class="notranslate">loki-gateway</code>) to confirm termination.</p>
+<p dir="auto">The cause was a transient API server connection timeout while etcd re-elected a leader between control plane nodes. Rerunning <code class="notranslate">kubectl drain</code> with <code class="notranslate">--force --grace-period=0</code> evicted the remaining pods instantly and allowed the VM shutdown to proceed cleanly.</p>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<ul dir="auto">
+<li><strong>Serial Maintenance Preserves Quorum:</strong> Taking down hosts one at a time ensures that both Corosync (Proxmox) and Raft/etcd (Kubernetes) remain quorate throughout the operation.</li>
+<li><strong>SSoT Maintenance Prevents Documentation Drift:</strong> Updating hardware facts in <code class="notranslate">docs/environment-data.md</code> immediately after physical hardware changes prevents future SRE confusion and keeps AI agent context clean.</li>
+</ul>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">With both hypervisors running on 24GB RAM and 5 k3s nodes fully healthy, the next priority is expanding our GitOps coverage to secondary workloads and finalizing Azure Key Vault secret reconciliation.</p>
+        </article>
+
+    </main>
+</body>
+</html>
