@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>The Third Physical NUC: Retiring the NAS Quorum for True 3-Node Physical HA | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>The Third Physical NUC: Retiring the NAS Quorum for True 3-Node Physical HA</h1>
+            <p class="post-date">16 August 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Tags:</strong> homelab, proxmox, kubernetes, k3s, ha, etcd, corosync, opentofu, ansible, hardware</p>
+<p dir="auto">Odd-numbered cluster topologies are the golden rule of distributed consensus. When you only have two physical hypervisors, you end up relying on virtualized witnesses, QDevices on network attached storage, or tainted quorum VMs. But when a third physical node arrives, everything changes. In this post, I cover how adding a third Intel NUC enabled us to retire the Synology VMM quorum setup, form a native 3-node Proxmox cluster, and deploy a symmetrical 6-node HA Kubernetes topology completely contained within VLAN 99.</p>
+<hr>
+<h2 dir="auto">The Setup</h2>
+<p dir="auto">Historically, the homelab operated with two physical compute nodes (<code class="notranslate">pve01</code> and <code class="notranslate">pve02</code>). To maintain high availability and prevent split-brain:</p>
+<ul dir="auto">
+<li><strong>Proxmox Quorum:</strong> Handled by a Debian QDevice VM (<code class="notranslate">corosync-qnetd</code>) running on the Synology DS920+ NAS in Management VLAN 1 (<code class="notranslate">192.168.10.13</code>).</li>
+<li><strong>k3s etcd Consensus:</strong> Maintained with a third control-plane VM (<code class="notranslate">k3s-server-03</code>, <code class="notranslate">192.168.10.23</code>) also running in Synology Virtual Machine Manager (VMM), tainted with <code class="notranslate">dedicated=control-plane:NoSchedule</code> so it didn't consume NAS resources running pods.</li>
+</ul>
+<p dir="auto">While this worked reliably (and taught us a lot about distributed quorum), it introduced cross-VLAN dependencies, split failure domains across compute and storage hardware, and consumed memory on the NAS that was better suited for storage and backups.</p>
+<p dir="auto">When a third physical Intel NUC 7 i7 (<code class="notranslate">NUC7i7BNH</code> / CPU <code class="notranslate">i7-7567U</code>, 16GB RAM, 256GB NVMe) joined the rack, we had the hardware needed for a clean architectural redesign.</p>
+<hr>
+<h2 dir="auto">What I Built</h2>
+<h3 dir="auto">1. Native 3-Node Proxmox VE Cluster</h3>
+<p dir="auto">With the 3rd physical host installed on Homelab VLAN 99 as <code class="notranslate">pve03</code> (<code class="notranslate">192.168.99.13</code>), Corosync now runs directly across the three physical NUCs:</p>
+<ul dir="auto">
+<li><code class="notranslate">pve01</code> (24GB RAM, 1 vote)</li>
+<li><code class="notranslate">pve02</code> (24GB RAM, 1 vote)</li>
+<li><code class="notranslate">pve03</code> (16GB RAM, 1 vote)</li>
+</ul>
+<p dir="auto">We decommissioned the Synology QDevice (<code class="notranslate">pvecm qdevice remove</code>), moving to a native 3-vote Corosync ring with full 1-node fault tolerance.</p>
+<h3 dir="auto">2. Symmetrical 6-Node k3s HA Topology</h3>
+<p dir="auto">Instead of running uneven or tainted VMs, we established a symmetrical design where <strong>every physical Proxmox host runs exactly 1 control-plane VM and 1 worker VM</strong>:</p>
+<pre class="notranslate"><code class="notranslate">┌────────────────────────────────────────────────────────────────────────┐
+│                        HOMELAB PHYSICAL CLUSTER                        │
+│                                                                        │
+│    pve01 (24GB)              pve02 (24GB)              pve03 (16GB)    │
+│  ┌──────────────────┐      ┌──────────────────┐      ┌───────────────┐ │
+│  │ k3s-server-01    │      │ k3s-server-02    │      │ k3s-server-03 │ │
+│  │ (VM 301 / .21)   │      │ (VM 304 / .22)   │      │ (VM 306 / .23)│ │
+│  ├──────────────────┤      ├──────────────────┤      ├───────────────┤ │
+│  │ k3s-agent-01     │      │ k3s-agent-02     │      │ k3s-agent-03  │ │
+│  │ (VM 302 / .30)   │      │ (VM 305 / .31)   │      │ (VM 307 / .32)│ │
+│  └──────────────────┘      └──────────────────┘      └───────────────┘ │
+└────────────────────────────────────────────────────────────────────────┘
+</code></pre>
+<ul dir="auto">
+<li><strong><code class="notranslate">k3s-server-03</code></strong> is now an untainted, full control-plane peer participating in etcd consensus and workload scheduling alongside <code class="notranslate">k3s-server-01</code> and <code class="notranslate">k3s-server-02</code>.</li>
+<li><strong><code class="notranslate">k3s-agent-03</code></strong> provides dedicated worker capacity on the 3rd host.</li>
+<li>All 6 VMs reside entirely on VLAN 99 (<code class="notranslate">192.168.99.0/24</code>).</li>
+</ul>
+<h3 dir="auto">3. Codified in IaC and Ansible</h3>
+<ul dir="auto">
+<li><strong>OpenTofu (<code class="notranslate">infra/</code>):</strong> Added <code class="notranslate">proxmox_node_tertiary</code> and VM resources for <code class="notranslate">k3s_server_03</code> and <code class="notranslate">k3s_agent_03</code>.</li>
+<li><strong>Ansible (<code class="notranslate">config/</code>):</strong> Updated <code class="notranslate">inventory/hosts.yaml</code> to purge all <code class="notranslate">qdevice</code> groups, and standardized <code class="notranslate">k3s-server-03.yaml</code> and <code class="notranslate">os-patching-proxmox.yaml</code> for serial 3-node lifecycle management.</li>
+</ul>
+<hr>
+<h2 dir="auto">The Decision</h2>
+<p dir="auto">This architectural shift is documented in <strong><a href="../adr/021-three-node-proxmox-k3s-topology.md">ADR-021: 3-Node Physical Proxmox VE Cluster &amp; Symmetrical k3s HA Topology</a></strong>, which supersedes the historical 2-node + QDevice decision in <a href="../adr/002-two-node-qdevice.md">ADR-002</a>.</p>
+<h3 dir="auto">Why Symmetrical Hypervisor / VM Pairing?</h3>
+<ol dir="auto">
+<li><strong>Predictable Failure Domains:</strong> If any physical NUC fails or reboots for maintenance, the cluster loses exactly 1/3 of its control-plane quorum (leaving 2/3 votes, fully operational) and 1/3 of worker scheduling capacity.</li>
+<li><strong>Eliminated Cross-VLAN Witnessing:</strong> All Corosync and k3s traffic remains isolated inside VLAN 99. The Synology NAS on VLAN 1 is purely a high-throughput NFS storage target.</li>
+</ol>
+<hr>
+<h2 dir="auto">What This Taught Me</h2>
+<ul dir="auto">
+<li><strong>Witnesses Are Great For Scarcity, Physical Quorum Is Better For Simplicity:</strong> Using Synology VMM for QDevice and tainted control plane VMs was a great way to build HA on a budget, but removing that layer reduces operational complexity and inter-device dependencies significantly.</li>
+<li><strong>Documentation &amp; IaC First:</strong> Updating the Single Source of Truth (<code class="notranslate">environment-data.md</code>), OpenTofu definitions, Ansible playbooks, and execution procedures before touching live infrastructure makes large-scale platform migrations smooth and error-free.</li>
+</ul>
+<hr>
+<h2 dir="auto">What's Next</h2>
+<p dir="auto">With <code class="notranslate">pve03</code> online and the migration procedure ready in <a href="../operations/procedures/proxmox-migrate-to-three-node-cluster.md"><code class="notranslate">docs/operations/procedures/proxmox-migrate-to-three-node-cluster.md</code></a>, the next steps are executing the cluster join, running <code class="notranslate">tofu apply</code>, and decommissioning the legacy Synology VMs.</p>
+        </article>
+
+    </main>
+</body>
+</html>

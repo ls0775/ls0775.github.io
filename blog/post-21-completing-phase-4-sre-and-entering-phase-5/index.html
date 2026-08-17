@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0c">
+    <title>Milestone: Completing Phase 4 (SRE & Observability) and Entering Phase 5 (Governance & Reliability) | ls0775 blog</title>
+    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="stylesheet" href="/blog/blog.css">
+</head>
+<body>
+    <main class="page">
+        <header class="post-header">
+            <a class="back-link" href="/blog/">&larr; Blog</a>
+            <h1>Milestone: Completing Phase 4 (SRE & Observability) and Entering Phase 5 (Governance & Reliability)</h1>
+            <p class="post-date">16 August 2026</p>
+        </header>
+        <article class="prose">
+<p dir="auto"><strong>Date:</strong> 2026-08-16<br>
+<strong>Author:</strong> ls0775<br>
+<strong>Category:</strong> Milestone / Architecture / SRE</p>
+<hr>
+<h2 dir="auto">1. Executive Summary</h2>
+<p dir="auto">Today marks a major milestone in our homelab journey: the formal completion of <strong>Phase 4 (SRE Practices &amp; Observability)</strong> and the transition of the project into <strong>Phase 5 (Governance &amp; Reliability)</strong>.</p>
+<p dir="auto">What started as a foundational 2-node cluster has matured into a production-like, enterprise-grade platform running on a symmetrical <strong>3-node physical Proxmox cluster</strong> with a <strong>6-node HA k3s Kubernetes cluster</strong>, continuous Google SRE observability, pre-computed SLO recording rules, and native Azure Key Vault secret synchronisation.</p>
+<hr>
+<h2 dir="auto">2. What Phase 4 Delivered</h2>
+<p dir="auto">Over Phase 4, we built and hardened the observability, state management, and incident response layers:</p>
+<pre class="notranslate"><code class="notranslate">┌─────────────────────────────────────────────────────────────────────────────┐
+│                      PHASE 4 SRE &amp; OBSERVABILITY STACK                       │
+│                                                                             │
+│  ┌───────────────────────┐   ┌───────────────────────┐   ┌────────────────┐ │
+│  │   Prometheus &amp; Alerts │   │   Grafana Dashboards  │   │   Loki Logging │ │
+│  │  - 4 Golden Signals   │   │  - Global SLO Gauges  │   │  - Chunk S3/MinIO│ │
+│  │  - Burn Rate Alerts   │   │  - Latency / Traffic  │   │  - Promtail DS │ │
+│  └───────────────────────┘   └───────────────────────┘   └────────────────┘ │
+│                                                                             │
+│  ┌───────────────────────┐   ┌───────────────────────┐   ┌────────────────┐ │
+│  │   Disaster Recovery   │   │  External Secrets SSoT│   │   Remote State │ │
+│  │  - 6h etcd Snapshots  │   │  - Azure Key Vault    │   │  - MinIO S3    │ │
+│  │  - Restore Drills (DR)│   │  - Native ESO Sync    │   │  - OpenTofu    │ │
+│  └───────────────────────┘   └───────────────────────┘   └────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────────┘
+</code></pre>
+<ol dir="auto">
+<li><strong>Pre-computed SLOs &amp; Error Budgets (Mitigation R-005):</strong>
+<ul dir="auto">
+<li>Implemented 30-day rolling SLIs for k3s API (99.5%), Ingress (99.5%), and NFS Storage (99.9%).</li>
+<li>Deployed Google SRE multi-window burn-rate alerts (14.4x fast-burn and 3x slow-burn) linked to incident runbooks.</li>
+<li>Built a declarative Grafana Global SLO Reliability dashboard.</li>
+</ul>
+</li>
+<li><strong>Centralized Log Aggregation (Mitigation R-004):</strong>
+<ul dir="auto">
+<li>Deployed Loki SingleBinary (Replication Factor 3) backed by MinIO S3 object storage, with Promtail DaemonSets scraping all nodes.</li>
+</ul>
+</li>
+<li><strong>Automated Remote State (Mitigation R-002):</strong>
+<ul dir="auto">
+<li>Migrated OpenTofu IaC state from workstation local storage to distributed MinIO S3 backend.</li>
+</ul>
+</li>
+<li><strong>External Secrets Operator Cloud SSoT (Mitigation R-012):</strong>
+<ul dir="auto">
+<li>Centralized 14 platform and application secrets in Azure Key Vault (<code class="notranslate">kv-homelab-ls0775</code>) with continuous 1-hour native reconciliation.</li>
+</ul>
+</li>
+<li><strong>Chaos Engineering &amp; Automated Disaster Recovery Drills:</strong>
+<ul dir="auto">
+<li>Authored and verified single-host failure simulation drills (<code class="notranslate">test-proxmox-hardware-failure.sh</code>) and DR snapshot restore test suites (<code class="notranslate">test-disaster-recovery-restore.sh</code>), verifying an active RPO of 4.2 hours.</li>
+</ul>
+</li>
+</ol>
+<hr>
+<h2 dir="auto">3. Entering Phase 5: Governance &amp; Reliability</h2>
+<p dir="auto">With core infrastructure, networking, DevOps toolchains, and observability fully operational, <strong>Phase 5</strong> focuses on portfolio readiness, public sharing, and continuous integration:</p>
+<ul dir="auto">
+<li><strong>Mitigation R-006:</strong> GitHub Actions CI/CD for OpenTofu IaC plans on pull requests.</li>
+<li><strong>Formalized Error Budget Policies:</strong> Codifying release gating and blameless post-mortem cadences.</li>
+<li><strong>Public Portfolio Polish:</strong> Final secret sweeps, documentation scrubbing, and architecture showcases.</li>
+</ul>
+<hr>
+<h2 dir="auto">4. Platform State at Transition</h2>
+<ul dir="auto">
+<li><strong>Physical Hypervisors:</strong> <code class="notranslate">pve01</code>, <code class="notranslate">pve02</code>, <code class="notranslate">pve03</code> (3 identical Intel NUC 7 i7 nodes, 3 Corosync votes, quorate).</li>
+<li><strong>Kubernetes Compute:</strong> 6 VMs (<code class="notranslate">k3s-server-01..03</code>, <code class="notranslate">k3s-agent-01..03</code>) on VLAN 99 (<code class="notranslate">192.168.99.0/24</code>).</li>
+<li><strong>SRE Maturity Score:</strong> <strong>Level 3 (Resilient) — 2.90 / 4.0</strong> per Google SRE independent audit.</li>
+</ul>
+<hr>
+<p dir="auto"><strong>Next up:</strong> Phase 5 Governance, CI/CD automation, and public portfolio release!</p>
+        </article>
+
+    </main>
+</body>
+</html>
