@@ -196,7 +196,7 @@ def _template(page_title: str, content_html: str) -> str:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <meta name="theme-color" content="#0a0a0c">
+    <meta name="theme-color" content="#faf9f6">
     <title>{page_title}</title>
     <link rel="icon" type="image/png" href="/favicon.png">
     <link rel="stylesheet" href="/blog/blog.css">
