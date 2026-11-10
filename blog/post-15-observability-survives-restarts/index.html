@@ -41,17 +41,16 @@
 <p dir="auto">The fix split into three parts.</p>
 <h3 dir="auto">1. Prometheus got durable storage</h3>
 <p dir="auto">Prometheus now uses a <code class="notranslate">10Gi</code> PVC via <code class="notranslate">local-path</code>:</p>
-<pre lang="yaml" class="notranslate"><code class="notranslate">prometheus:
-  prometheusSpec:
-    storageSpec:
-      volumeClaimTemplate:
-        spec:
-          storageClassName: local-path
-          accessModes: ["ReadWriteOnce"]
-          resources:
-            requests:
-              storage: 10Gi
-</code></pre>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">prometheus</span>:
+  <span class="pl-ent">prometheusSpec</span>:
+    <span class="pl-ent">storageSpec</span>:
+      <span class="pl-ent">volumeClaimTemplate</span>:
+        <span class="pl-ent">spec</span>:
+          <span class="pl-ent">storageClassName</span>: <span class="pl-s">local-path</span>
+          <span class="pl-ent">accessModes</span>: <span class="pl-s">["ReadWriteOnce"]</span>
+          <span class="pl-ent">resources</span>:
+            <span class="pl-ent">requests</span>:
+              <span class="pl-ent">storage</span>: <span class="pl-s">10Gi</span></pre></div>
 <p dir="auto">That is not cross-node HA storage. It is a simpler and more immediate improvement: metrics survive pod restarts on the same node, which is a massive step up from "everything disappears if the pod is rescheduled."</p>
 <h3 dir="auto">2. Alertmanager got durable storage</h3>
 <p dir="auto">Alertmanager got the same treatment, with a smaller <code class="notranslate">1Gi</code> PVC. That means silences, deduplication state, and alerting context now survive restarts instead of resetting at the worst possible moment.</p>
@@ -59,21 +58,20 @@
 <h3 dir="auto">3. Loki moved from ephemeral storage to MinIO S3</h3>
 <p dir="auto">This was the bigger change.</p>
 <p dir="auto">Instead of storing data on the pod filesystem, Loki now writes to MinIO over the in-cluster S3 API:</p>
-<pre lang="yaml" class="notranslate"><code class="notranslate">loki:
-  schemaConfig:
-    configs:
-      - from: "2026-05-03"
-        store: tsdb
-        object_store: s3
-  storage:
-    type: s3
-    bucketNames:
-      chunks: loki
-      ruler: loki
-      admin: loki
-    s3:
-      endpoint: http://minio.storage.svc.cluster.local:9000
-</code></pre>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">loki</span>:
+  <span class="pl-ent">schemaConfig</span>:
+    <span class="pl-ent">configs</span>:
+      - <span class="pl-ent">from</span>: <span class="pl-s"><span class="pl-pds">"</span>2026-05-03<span class="pl-pds">"</span></span>
+        <span class="pl-ent">store</span>: <span class="pl-s">tsdb</span>
+        <span class="pl-ent">object_store</span>: <span class="pl-c1">s3</span>
+  <span class="pl-ent">storage</span>:
+    <span class="pl-ent">type</span>: <span class="pl-c1">s3</span>
+    <span class="pl-ent">bucketNames</span>:
+      <span class="pl-ent">chunks</span>: <span class="pl-s">loki</span>
+      <span class="pl-ent">ruler</span>: <span class="pl-s">loki</span>
+      <span class="pl-ent">admin</span>: <span class="pl-s">loki</span>
+    <span class="pl-ent">s3</span>:
+      <span class="pl-ent">endpoint</span>: <span class="pl-s">http://minio.storage.svc.cluster.local:9000</span></pre></div>
 <p dir="auto">Credentials come from a Kubernetes Secret via environment variables rather than being committed to the repo. The result is that log history survives Loki pod restarts, and MinIO becomes the durable backing store for the logging layer.</p>
 <p dir="auto">That matters because logs are often only interesting <em>after</em> something has already broken.</p>
 <hr>
@@ -89,10 +87,9 @@
 <p dir="auto">If you remove the second one, the first one does not save you.</p>
 <h3 dir="auto">Loki would not expand environment variables by default</h3>
 <p dir="auto">The access key and secret key were injected through <code class="notranslate">secretKeyRef</code>, but Loki does not automatically substitute <code class="notranslate">${ENV_VAR}</code> placeholders in the config. The fix was adding:</p>
-<pre lang="yaml" class="notranslate"><code class="notranslate">singleBinary:
-  extraArgs:
-    - -config.expand-env=true
-</code></pre>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">singleBinary</span>:
+  <span class="pl-ent">extraArgs</span>:
+    - <span class="pl-s">-config.expand-env=true</span></pre></div>
 <p dir="auto">Without that, the config looked right in Git and was wrong at runtime.</p>
 <h3 dir="auto">An old schema entry kept sending data to the wrong place</h3>
 <p dir="auto">The legacy filesystem schema entry from <code class="notranslate">2024-04-01</code> was still present. That meant current-time data was still being routed toward the old filesystem store instead of the new S3 backend. The fix was to remove the old entry and leave a single S3-backed schema from <code class="notranslate">2026-05-03</code>.</p>
@@ -104,10 +101,9 @@
 <h3 dir="auto">Grafana crashed on startup after the chart upgrade</h3>
 <p dir="auto">As part of the monitoring work, <code class="notranslate">kube-prometheus-stack</code> moved from <code class="notranslate">84.1.2</code> to <code class="notranslate">84.5.0</code>. After the upgrade, Grafana's <code class="notranslate">init-chown-data</code> init container started failing with <code class="notranslate">Permission denied</code> against existing PVC directories like <code class="notranslate">png</code>, <code class="notranslate">pdf</code>, and <code class="notranslate">csv</code>.</p>
 <p dir="auto">The PVC contents already had the correct ownership. The init container was trying to "fix" a problem that did not actually exist, and in doing so, it created a real one. The resolution was:</p>
-<pre lang="yaml" class="notranslate"><code class="notranslate">grafana:
-  initChownData:
-    enabled: false
-</code></pre>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">grafana</span>:
+  <span class="pl-ent">initChownData</span>:
+    <span class="pl-ent">enabled</span>: <span class="pl-c1">false</span></pre></div>
 <p dir="auto">That is a good reminder that chart defaults are not universally safe once a workload has real, existing state.</p>
 <h3 dir="auto">Argo CD repo-server had been unhealthy for days</h3>
 <p dir="auto">This one was pre-existing, which made it even more interesting. The Argo CD repo-server had been stuck in repeated restarts because its liveness probe was too strict:</p>
@@ -117,12 +113,11 @@
 <li>the timeout was <code class="notranslate">1</code> second</li>
 </ul>
 <p dir="auto">That was not enough. The process was healthy, but the probe budget was unrealistic. The fix was simply to give the probes enough time:</p>
-<pre lang="yaml" class="notranslate"><code class="notranslate">repoServer:
-  livenessProbe:
-    timeoutSeconds: 10
-  readinessProbe:
-    timeoutSeconds: 10
-</code></pre>
+<div class="highlight highlight-source-yaml" dir="auto"><pre class="notranslate"><span class="pl-ent">repoServer</span>:
+  <span class="pl-ent">livenessProbe</span>:
+    <span class="pl-ent">timeoutSeconds</span>: <span class="pl-c1">10</span>
+  <span class="pl-ent">readinessProbe</span>:
+    <span class="pl-ent">timeoutSeconds</span>: <span class="pl-c1">10</span></pre></div>
 <p dir="auto">The handoff notes recorded <strong>1807 restarts over 3 days</strong> before this was corrected. That is exactly the kind of problem observability work is supposed to reveal: not just new features, but broken assumptions already sitting in the platform.</p>
 <hr>
 <h2 dir="auto">The Real Decision: Durability First, Availability Later</h2>
